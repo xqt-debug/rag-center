@@ -1,0 +1,185 @@
+name: CI and Steam Deck deployment
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (${{ matrix.database }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [sqlite, postgresql]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag
+          POSTGRES_DB: rag
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rag -d rag"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Install OCR system libraries
+        run: sudo apt-get update && sudo apt-get install -y libgl1 libglib2.0-0 libgomp1
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - name: SQLite tests (including real HTTP MCP and local OCR)
+        if: matrix.database == 'sqlite'
+        run: uv run pytest -q
+      - name: PostgreSQL tests in isolated schemas
+        if: matrix.database == 'postgresql'
+        run: uv run pytest -q --postgresql
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run format:check
+      - run: npm run build
+
+  deployment-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RAG_IMAGE: ghcr.io/xqt-debug/rag-center@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n deploy/steamdeck/deploy.sh && bash -n deploy/steamdeck/docker-env.sh
+      - name: Validate deployment Compose without starting services
+        run: |
+          cp deploy/steamdeck/.env.example deploy/steamdeck/.env
+          docker compose --env-file deploy/steamdeck/.env.example -f deploy/steamdeck/compose.yaml config --quiet
+
+  image:
+    needs: [backend, frontend, deployment-config]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image name
+        id: name
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "image=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify runtime, migrations, local OCR and bundled frontend
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}
+        run: |
+          docker run --rm \
+            -e RAG_DATABASE_URL=sqlite:////app/data/smoke.sqlite \
+            -e RAG_EMBEDDING_PROVIDER=local-test \
+            -v "$PWD/tests/fixtures:/fixtures:ro" \
+            --entrypoint sh "$IMAGE" -ec '
+              python -m alembic upgrade head
+              python -c "from pathlib import Path; from rag_center.ingestion import parse_document; from rag_center.app import app; assert Path(\"/app/frontend/dist/index.html\").is_file(); assert \"TCP\" in parse_document(\"/fixtures/ocr-note.png\", \"note.png\").text; print(\"Container smoke passed\")"
+            '
+
+  deploy:
+    needs: image
+    if: >-
+      github.event_name != 'pull_request' && github.ref == 'refs/heads/main' &&
+      vars.STEAMDECK_DEPLOY_ENABLED == 'true'
+    runs-on: [self-hosted, Linux, X64, steamdeck]
+    environment: steamdeck
+    concurrency:
+      group: steamdeck-deployment
+      cancel-in-progress: false
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    env:
+      RAG_DEPLOY_DIR: ${{ vars.STEAMDECK_DEPLOY_DIR }}
+      RAG_IMAGE: ${{ needs.image.outputs.image }}@${{ needs.image.outputs.digest }}
+      DOCKER_CONFIG: ${{ runner.temp }}/rag-center-docker-${{ github.run_id }}
+    steps:
+      - name: Skip superseded main commits
+        id: current
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'heads/main'
+            });
+            core.setOutput('current', data.object.sha === context.sha ? 'true' : 'false');
+      - uses: actions/checkout@v4
+        if: steps.current.outputs.current == 'true'
+        with:
+          persist-credentials: false
+      - name: Prepare Rootless Docker and the user's Compose plugin
+        if: steps.current.outputs.current == 'true'
+        shell: bash
+        run: |
+          source deploy/steamdeck/docker-env.sh
+          printf '%s\n' "$HOME/bin" "$HOME/.local/bin" >> "$GITHUB_PATH"
+          if [[ -n "${DOCKER_HOST:-}" ]]; then
+            printf 'DOCKER_HOST=%s\n' "$DOCKER_HOST" >> "$GITHUB_ENV"
+          fi
+          docker info --format '{{.ServerVersion}}'
+          docker compose version
+      - uses: docker/login-action@v3
+        if: steps.current.outputs.current == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull, back up, migrate and deploy
+        if: steps.current.outputs.current == 'true'
+        run: bash deploy/steamdeck/deploy.sh "$RAG_IMAGE"
