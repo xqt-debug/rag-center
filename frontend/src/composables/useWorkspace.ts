@@ -55,7 +55,8 @@ export function useWorkspace() {
     error = ref(''),
     modal = ref<DialogKind>(''),
     form = ref<EditorForm>(emptyEditorForm()),
-    preview = ref<TextPreview | null>(null)
+    preview = ref<TextPreview | null>(null),
+    previewImageUrl = ref('')
   const query = ref(''),
     mode = ref<SearchMode>('hybrid'),
     searchBase = ref(''),
@@ -154,6 +155,9 @@ export function useWorkspace() {
       if (current) {
         // 仅同步只读预览，不覆盖用户正在编辑的表单；新版本发布后重新读取文本。
         form.value = { ...form.value, ...current }
+        if (current.is_image && current.current_version !== preview.value?.version_id) {
+          await loadPreviewImage(current)
+        }
         if (current.current_version && preview.value?.version_id !== current.current_version) {
           const text = await action<TextPreview>('read_document', { document_id: current.id })
           if (
@@ -242,6 +246,7 @@ export function useWorkspace() {
     modal.value = ''
     rawKey.value = ''
     preview.value = null
+    previewImageUrl.value = ''
     form.value = emptyEditorForm()
     error.value = ''
   }
@@ -325,9 +330,39 @@ export function useWorkspace() {
     await attempt(async () => {
       form.value = { ...emptyEditorForm(), ...doc }
       modal.value = 'preview'
+      preview.value = null
+      previewImageUrl.value = ''
+      if (doc.is_image) await loadPreviewImage(doc)
       preview.value = doc.current_version
         ? await action<TextPreview>('read_document', { document_id: doc.id })
         : null
+    })
+  }
+  async function loadPreviewImage(doc: Pick<DocumentRecord, 'id'>) {
+    const ticket = await action<{ url: string }>('download_document', { document_id: doc.id })
+    const path = new URL(ticket.url, location.origin).pathname
+    if (!path.startsWith('/api/transfers/download/')) throw new Error('图片预览地址无效')
+    // 临时链接只保留在当前弹窗，服务端仍会校验撤销、版本变化和删除状态。
+    if (modal.value === 'preview' && form.value.id === doc.id)
+      previewImageUrl.value = `${path}?inline=true`
+  }
+  async function refreshPreviewImage() {
+    await attempt(() => loadPreviewImage(form.value))
+  }
+  async function createText() {
+    await attempt(async () => {
+      await action(
+        'create_document',
+        {
+          knowledge_base_id: form.value.knowledge_base_id,
+          name: form.value.name,
+          text: form.value.text,
+        },
+        true,
+      )
+      closeModal()
+      await refresh()
+      notify('文本已保存，正在等待建立索引')
     })
   }
   async function readMore() {
@@ -547,6 +582,9 @@ export function useWorkspace() {
     modal,
     form,
     preview,
+    previewImageUrl,
+    refreshPreviewImage,
+    createText,
     query,
     mode,
     searchBase,

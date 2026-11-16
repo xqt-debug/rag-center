@@ -3,6 +3,7 @@
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..media import image_media_type, is_image
 from ..models import Document, DocumentVersion, Job, KnowledgeBase
 
 
@@ -47,6 +48,15 @@ def document_json(session: Session, doc: Document, active_profile: str) -> dict:
         "id": doc.id,
         "knowledge_base_id": doc.kb_id,
         "name": doc.name,
+        "is_image": is_image((current or latest).filename) if latest else False,
+        "media_type": image_media_type((current or latest).filename)
+        if latest and is_image((current or latest).filename)
+        else None,
+        "text_source": "provided"
+        if (current or latest) and (current or latest).provided_text is not None
+        else "ocr"
+        if latest and is_image((current or latest).filename)
+        else "text",
         "revision": doc.revision,
         "current_version": doc.current_version,
         "latest_version": doc.latest_version,

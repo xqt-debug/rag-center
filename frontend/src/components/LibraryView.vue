@@ -22,6 +22,7 @@ import { useWorkspaceContext } from '../context'
 import { computed } from 'vue'
 import DocumentIndexStatus from './DocumentIndexStatus.vue'
 import { indexSubtitle, summarizeIndexing } from '../documentIndex'
+import { supportedFileTypes } from '../media'
 const workspace = useWorkspaceContext()
 const {
   health,
@@ -148,7 +149,7 @@ function changePage(delta: number) {
           <span class="subtle">/ 文件</span>
         </h2>
         <p class="muted small">
-          支持 TXT、Markdown、文本 PDF · 单文件最多 {{ health.max_file_mb || 20 }} MB
+          支持文本、PDF、图片与 GIF 动图 · 单文件最多 {{ health.max_file_mb || 20 }} MB
         </p>
       </div>
       <div class="button-group">
@@ -177,6 +178,16 @@ function changePage(delta: number) {
         >
           <Trash2 :size="16" />
         </button>
+        <button
+          class="secondary small-btn"
+          :disabled="busy"
+          @click="
+            openModal('new-text', { name: '笔记.txt', text: '', knowledge_base_id: selected })
+          "
+        >
+          <Pencil :size="15" />
+          粘贴文本
+        </button>
         <button class="primary small-btn" :disabled="uploading" @click="fileInput?.click()">
           <Upload :size="15" />
           {{ uploading ? '上传中…' : '上传文件' }}
@@ -185,7 +196,7 @@ function changePage(delta: number) {
           ref="fileInput"
           type="file"
           multiple
-          accept=".txt,.md,.pdf"
+          :accept="supportedFileTypes"
           class="hidden"
           @change="uploadFiles"
         />
@@ -198,6 +209,7 @@ function changePage(delta: number) {
       <span v-if="indexingSummary.testing">测试索引 {{ indexingSummary.testing }} 份</span>
       <span v-if="indexingSummary.needsReindex">需重建 {{ indexingSummary.needsReindex }} 份</span>
       <span>处理中 {{ indexingSummary.processing }} 份</span>
+      <span v-if="indexingSummary.stored">仅保存 {{ indexingSummary.stored }} 份</span>
       <span :class="{ 'index-summary-failed': indexingSummary.failed > 0 }">
         失败 {{ indexingSummary.failed }} 份
       </span>
@@ -217,7 +229,10 @@ function changePage(delta: number) {
     >
       <span class="empty-icon"><Upload :size="25" /></span>
       <h3>把资料放进来，让知识连接起来</h3>
-      <p>上传后自动提取文本，建立关键词与向量索引。</p>
+      <p>
+        支持 TXT、Markdown、文本 PDF 和 PNG/JPEG/GIF/WebP/BMP。图片通过 OCR
+        识别文字，原图和动画完整保留。
+      </p>
       <button class="text-button" @click="fileInput?.click()">
         选择本地文件
         <ArrowRight :size="14" />

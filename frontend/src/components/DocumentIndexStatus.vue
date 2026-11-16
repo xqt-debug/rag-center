@@ -80,6 +80,9 @@ const previousVersion = computed(
     <small v-if="document.status === 'failed'" class="index-failure" role="alert">
       {{ document.error || '索引处理失败，请重试' }}
     </small>
+    <small v-else-if="document.status === 'stored'" class="muted">
+      原图可预览、下载；未建立文字索引
+    </small>
     <small v-else-if="document.status === 'queued'" class="muted">
       等待后台处理，状态将自动更新
     </small>

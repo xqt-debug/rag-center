@@ -3,6 +3,7 @@ import { ArrowDownToLine, ArrowRight, Check, Copy, Trash2, Upload, X } from 'luc
 import { size, date } from '../api'
 import { useWorkspaceContext } from '../context'
 import { readyIndexLabel } from '../documentIndex'
+import { supportedFileTypes } from '../media'
 const workspace = useWorkspaceContext()
 const {
   busy,
@@ -11,6 +12,9 @@ const {
   modal,
   form,
   preview,
+  previewImageUrl,
+  refreshPreviewImage,
+  createText,
   keyMode,
   keyScopes,
   keyBases,
@@ -38,7 +42,7 @@ const {
   <div v-if="modal" class="modal-backdrop" @click.self="closeModal">
     <section
       class="modal"
-      :class="{ wide: ['preview', 'edit-doc', 'config'].includes(modal) }"
+      :class="{ wide: ['preview', 'edit-doc', 'new-text', 'config'].includes(modal) }"
       role="dialog"
       aria-modal="true"
       :aria-label="modal === 'config' ? 'MCP 配置' : '管理资料'"
@@ -91,6 +95,34 @@ const {
           </button>
         </div>
       </template>
+      <template v-else-if="modal === 'new-text'">
+        <span class="mini-label">TEXT NOTE</span>
+        <h2>保存文本资料</h2>
+        <form @submit.prevent="createText">
+          <label>
+            文件名称（.txt 或 .md）
+            <input v-model="form.name" required maxlength="240" pattern=".*\.(txt|md)$" />
+          </label>
+          <label>
+            文本内容
+            <textarea
+              v-model="form.text"
+              rows="14"
+              class="editor"
+              required
+              maxlength="200000"
+              placeholder="粘贴学习资料或输入笔记…"
+            />
+          </label>
+          <p class="muted small">
+            保存后自动分块并建立关键词与向量索引，内容可下载为原始文本文件。
+          </p>
+          <button class="primary full" :disabled="busy">
+            保存并建立索引
+            <Check :size="16" />
+          </button>
+        </form>
+      </template>
       <template v-else-if="modal === 'preview'">
         <span class="mini-label">DOCUMENT PREVIEW</span>
         <h2>{{ form.name }}</h2>
@@ -107,8 +139,33 @@ const {
           最近可检索版本索引完成于 {{ date(form.indexed_at) }}
         </p>
         <div v-if="form.error" class="error">{{ form.error }}</div>
+        <div v-if="form.is_image" class="image-preview">
+          <img v-if="previewImageUrl" :src="previewImageUrl" :alt="form.name" />
+          <button class="text-button" :disabled="busy" @click="refreshPreviewImage">
+            刷新图片预览
+          </button>
+          <p class="muted small">
+            保留原图；GIF 等动图可直接播放。OCR 仅识别文字，动图最多抽取 12
+            帧，可能遗漏短暂出现的内容。
+          </p>
+        </div>
+        <p v-if="form.is_image && preview?.text" class="muted small">
+          {{
+            form.text_source === 'provided'
+              ? '以下为随图片提供的文字内容。'
+              : '以下为 OCR 识别文字，请与原图核对。'
+          }}
+        </p>
         <pre v-if="preview" class="document-preview">{{ preview.text }}</pre>
-        <div v-else class="empty"><p>索引完成后可预览提取文本。原文件仍可下载。</p></div>
+        <div v-if="!preview?.text" class="empty">
+          <p>
+            {{
+              form.status === 'stored'
+                ? '原图已保存，未识别到可检索文字。'
+                : '处理完成后可预览提取文本。原文件仍可下载。'
+            }}
+          </p>
+        </div>
         <button
           v-if="preview?.next_offset !== null && preview"
           class="text-button"
@@ -149,7 +206,12 @@ const {
           <label class="file-replace secondary">
             <Upload :size="15" />
             选择文件替换内容
-            <input type="file" accept=".txt,.md,.pdf" @change="replaceFile" :disabled="busy" />
+            <input
+              type="file"
+              :accept="supportedFileTypes"
+              @change="replaceFile"
+              :disabled="busy"
+            />
           </label>
           <button class="primary full" :disabled="busy">
             保存修改
@@ -243,7 +305,7 @@ const {
               ? '配置包含完整密钥，请仅保存到你信任的客户端。'
               : '将密钥占位符替换为你保存的密钥。'
           }}
-          PDF 上传下载需要 Agent 具备 HTTP 文件传输能力。
+          PDF、图片和动图上传下载需要 Agent 具备 HTTP 文件传输能力。
         </p>
         <div class="modal-buttons">
           <button class="secondary" @click="downloadConfig">

@@ -69,6 +69,20 @@ class DocUpdate(DocRef):
         return self
 
 
+class ImageDocCreate(Input):
+    knowledge_base_id: str
+    name: str = Field(min_length=1, max_length=240)
+    text: str = Field(min_length=1, max_length=200000)
+    upload_id: str | None = Field(None, min_length=1, max_length=64)
+    image_base64: str | None = Field(None, min_length=1, max_length=28000000)
+
+    @model_validator(mode="after")
+    def one_image_source(self):
+        if (self.upload_id is None) == (self.image_base64 is None):
+            raise ValueError("Exactly one of upload_id or image_base64 is required")
+        return self
+
+
 class DocDelete(DocRef):
     expected_revision: int = Field(ge=1)
 

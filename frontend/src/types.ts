@@ -3,7 +3,7 @@ export type PageName = 'library' | 'search' | 'keys' | 'activity'
 export type SearchMode = 'semantic' | 'keyword' | 'hybrid'
 export type Scope = 'read' | 'create' | 'update' | 'delete' | 'download' | 'kb:create'
 export type DocumentStatus =
-  'queued' | 'parsing' | 'chunking' | 'indexing' | 'ready' | 'failed' | 'cancelled'
+  'queued' | 'parsing' | 'chunking' | 'indexing' | 'ready' | 'stored' | 'failed' | 'cancelled'
 export type DialogKind =
   | ''
   | 'base'
@@ -11,6 +11,7 @@ export type DialogKind =
   | 'delete-doc'
   | 'preview'
   | 'edit-doc'
+  | 'new-text'
   | 'new-key'
   | 'config'
   | 'revoke'
@@ -41,6 +42,9 @@ export interface DocumentRecord {
   id: string
   knowledge_base_id: string
   name: string
+  is_image: boolean
+  media_type: string | null
+  text_source: 'text' | 'ocr' | 'provided'
   revision: number
   current_version: string | null
   latest_version: string | null
@@ -139,6 +143,8 @@ export interface Paged<T> extends ItemList<T> {
 export interface EditorForm {
   id: string
   name: string
+  is_image: boolean
+  text_source: 'text' | 'ocr' | 'provided'
   description: string
   revision: number
   knowledge_base_id: string
@@ -160,6 +166,8 @@ export function emptyEditorForm(): EditorForm {
   return {
     id: '',
     name: '',
+    is_image: false,
+    text_source: 'text',
     description: '',
     revision: 1,
     knowledge_base_id: '',

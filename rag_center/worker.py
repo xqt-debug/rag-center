@@ -32,6 +32,7 @@ class JobClaim:
     filename: str
     content_hash: str
     cancelled: bool
+    provided_text: str | None = None
 
 
 class Worker:
@@ -92,6 +93,7 @@ class Worker:
                 version.filename,
                 version.content_hash,
                 cancelled,
+                version.provided_text,
             )
             session.commit()
             return claim
@@ -197,13 +199,14 @@ class Worker:
                 parsed.page_count,
                 len(pieces),
             )
-            version.status, version.error = "ready", ""
+            # 没有识别出文字的图片只保存原文件，不伪造向量或索引完成时间。
+            version.status, version.error = ("ready" if pieces else "stored"), ""
             # 记录实际生成向量的配置，不能沿用任务排队时的旧模型信息。
             version.embedding_profile = self.embedder.profile
-            version.indexed_at = time.time()
+            version.indexed_at = time.time() if pieces else None
             document.current_version = version.id
             document.revision += 1  # 新版本发布后，编辑方必须重新读取最新修订号。
-            job.status, job.error, job.lease_until = "ready", "", 0
+            job.status, job.error, job.lease_until = version.status, "", 0
             # 两类索引、提取文本和当前版本指针在同一事务中一起生效。
             session.commit()
 
@@ -237,12 +240,19 @@ class Worker:
         try:
             # 解析和外部服务请求均在发布事务之外执行，避免长时间持锁。
             self._stage(claim, "parsing")
-            parsed = parse_document(claim.path, claim.filename)
+            # Agent 已提供图片正文时无需再次 OCR；按版本持久化，重启/重试仍使用同一正文。
+            parsed = (
+                ParsedDocument([(None, claim.provided_text)], page_count=0)
+                if claim.provided_text is not None
+                else parse_document(claim.path, claim.filename)
+            )
             self._stage(claim, "chunking")
             pieces = chunk_pages(parsed.pages)
             self._stage(claim, "indexing")
             vectors = self._reuse_vectors(claim, pieces)
-            if vectors is None:
+            if not pieces:
+                vectors = []
+            elif vectors is None:
                 vectors = self.embedder.embed([content for _, content in pieces])
             self._publish(claim, parsed, pieces, vectors)
         except Exception as error:
@@ -268,6 +278,7 @@ class Worker:
                 if version.path:
                     Path(version.path).unlink(missing_ok=True)
                     version.path, version.text, version.size = "", "", 0
+                    version.provided_text = None
             session.execute(delete(Chunk).where(Chunk.document_id.in_(deleted_ids)))
             session.execute(
                 update(Job)

@@ -82,6 +82,8 @@ class DocumentVersion(Base):
     path: Mapped[str] = mapped_column(Text)
     size: Mapped[int] = mapped_column(Integer)
     content_hash: Mapped[str] = mapped_column(String(64))
+    # None 表示自动提取/OCR；非空文本是调用方提供的图片正文，重试时不能丢失。
+    provided_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     text: Mapped[str] = mapped_column(Text, default="")
     page_count: Mapped[int] = mapped_column(Integer, default=0)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)

@@ -50,6 +50,7 @@ export function summarizeIndexing(documents: IndexState[]) {
     ).length,
     processing: documents.filter((document) => isIndexing(document.status)).length,
     failed: documents.filter((document) => document.status === 'failed').length,
+    stored: documents.filter((document) => document.status === 'stored').length,
   }
 }
 
@@ -67,6 +68,7 @@ export function indexSubtitle(document: DocumentRecord): string {
     return '原模型配置已变化；关键词可检索，向量索引需重建'
   }
   if (document.status === 'failed') return '索引未完成，可查看原因并重试'
+  if (document.status === 'stored') return '原图已保存，OCR 未识别到文字；可预览和下载'
   if (document.status === 'cancelled') return '索引任务已取消'
   if (document.status === 'queued') return '等待后台处理'
   return '处理完成后将自动更新状态'

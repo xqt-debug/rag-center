@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ..config import Settings
 from ..errors import DomainError, require
+from ..media import IMAGE_TYPES, is_image, validate_image
 
 
 class FileStorage:
@@ -18,7 +19,11 @@ class FileStorage:
             "文件名称无效",
         )
         ext = Path(name).suffix.lower()
-        require(ext in {".txt", ".md", ".pdf"}, "unsupported_type", "支持 TXT、Markdown 和文本 PDF")
+        require(
+            ext in {".txt", ".md", ".pdf", *IMAGE_TYPES},
+            "unsupported_type",
+            "支持 TXT、Markdown、文本 PDF、PNG、JPEG、GIF、WebP 和 BMP",
+        )
         return ext
 
     def validate_content(self, name: str, body: bytes) -> None:
@@ -26,7 +31,9 @@ class FileStorage:
         require(
             0 < len(body) <= self.settings.max_file_mb * 1024**2, "file_too_large", "文件为空或超过限制", 413
         )
-        if ext == ".pdf":
+        if is_image(name):
+            validate_image(name, body)
+        elif ext == ".pdf":
             require(body.lstrip().startswith(b"%PDF-"), "invalid_file", "文件不是有效 PDF")
         else:
             try:

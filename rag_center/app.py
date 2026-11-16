@@ -211,8 +211,15 @@ def create_app(settings=None):
         return await anyio.to_thread.run_sync(lambda: service.receive_upload(token, b"".join(parts)))
 
     @app.get("/api/transfers/download/{token}")
-    def download(token: str):
+    def download(token: str, inline: bool = False):
         path, name = service.resolve_download(token)
+        if inline:
+            from .media import image_media_type, is_image
+
+            require(is_image(name), "unsupported_preview", "在线原文件预览仅支持图片")
+            return FileResponse(
+                path, filename=name, media_type=image_media_type(name), content_disposition_type="inline"
+            )
         return FileResponse(path, filename=name, media_type="application/octet-stream")
 
     frontend = Path(__file__).resolve().parents[1] / "frontend" / "dist"

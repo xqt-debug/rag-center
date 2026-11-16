@@ -43,7 +43,7 @@ test('本页完成、处理和失败数量分别统计', () => {
       document({ status: 'indexing' }),
       document({ status: 'cancelled' }),
     ]),
-    { completed: 1, testing: 0, needsReindex: 0, processing: 2, failed: 1 },
+    { completed: 1, testing: 0, needsReindex: 0, processing: 2, failed: 1, stored: 0 },
   )
 })
 
@@ -92,6 +92,7 @@ test('测试向量和过期模型索引不计入真实完成，也不触发完�
     needsReindex: 1,
     processing: 0,
     failed: 0,
+    stored: 0,
   })
   assert.equal(newlyIndexed([document()], [testing]).length, 0)
   assert.match(indexSubtitle(testing), /未调用真实模型/)
@@ -100,4 +101,15 @@ test('测试向量和过期模型索引不计入真实完成，也不触发完�
     newlyIndexed([testing], [document({ status: 'ready', current_version: 'v2' })]).length,
     1,
   )
+})
+
+test('无文字图片仅计为保存，不显示完成提醒或持续快速轮询', () => {
+  const stored = document({ status: 'stored', current_version: 'v1', vector_index_ready: false })
+  const summary = summarizeIndexing([stored])
+  assert.equal(summary.stored, 1)
+  assert.equal(summary.completed, 0)
+  assert.equal(summary.processing, 0)
+  assert.equal(newlyIndexed([document()], [stored]).length, 0)
+  assert.match(indexSubtitle(stored), /原图已保存.*未识别到文字/)
+  assert.equal(indexPollingSeconds([stored]), 15)
 })

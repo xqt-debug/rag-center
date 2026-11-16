@@ -1,8 +1,10 @@
 import asyncio
+import base64
 import json
 import socket
 import threading
 import time
+from pathlib import Path
 
 import httpx
 import uvicorn
@@ -89,8 +91,12 @@ def test_real_mcp_client_complete_crud_and_revocation(system):
                 async with ClientSession(read, write) as client:
                     await client.initialize()
                     tools = (await client.list_tools()).tools
-                    assert len(tools) == 17
+                    assert len(tools) == 18
                     assert "ctx" not in next(t for t in tools if t.name == "search").inputSchema["properties"]
+                    create_tool = next(t for t in tools if t.name == "create_document")
+                    assert "text" in create_tool.inputSchema["properties"]
+                    assert "upload_id" not in create_tool.inputSchema.get("required", [])
+                    assert "无需" in create_tool.description
 
                     async def call(name, payload):
                         result = await client.call_tool(name, payload)
@@ -103,12 +109,13 @@ def test_real_mcp_client_complete_crud_and_revocation(system):
                         "update_knowledge_base",
                         {"knowledge_base_id": base["id"], "name": "Agent 文档", "expected_revision": 1},
                     )
+                    original_text = "# 中文学习笔记\n\nMCP 可以检索合同 HT-2026-018。\n公式：a + b = c。\n"
                     doc = await call(
                         "create_document",
                         {
                             "knowledge_base_id": base["id"],
                             "name": "MCP.txt",
-                            "text": "MCP 可以检索合同 HT-2026-018。",
+                            "text": original_text,
                             "request_id": "doc-1",
                         },
                     )
@@ -117,7 +124,7 @@ def test_real_mcp_client_complete_crud_and_revocation(system):
                         {
                             "knowledge_base_id": base["id"],
                             "name": "MCP.txt",
-                            "text": "MCP 可以检索合同 HT-2026-018。",
+                            "text": original_text,
                             "request_id": "doc-1",
                         },
                     )
@@ -127,23 +134,69 @@ def test_real_mcp_client_complete_crud_and_revocation(system):
                     assert current["status"] == "ready"
                     found = await call("search", {"query": "HT-2026-018", "mode": "hybrid"})
                     assert found["results"][0]["document_id"] == doc["id"]
-                    assert (await call("read_document", {"document_id": doc["id"]}))["text"]
+                    first = await call("read_document", {"document_id": doc["id"], "limit": 12})
+                    remaining = await call(
+                        "read_document",
+                        {
+                            "document_id": doc["id"],
+                            "offset": first["next_offset"],
+                        },
+                    )
+                    assert first["text"] + remaining["text"] == original_text
+                    assert remaining["next_offset"] is None
+                    ticket = await call("download_document", {"document_id": doc["id"]})
+                    response = await http.get(
+                        f"http://127.0.0.1:{port}/api/transfers/download/" + ticket["url"].rsplit("/", 1)[1]
+                    )
+                    assert response.status_code == 200
+                    assert response.content == original_text.encode("utf-8")
+                    new_text = "修改后的学习笔记。\nTCP 重传机制，编号 NOTE-2026-119。\n"
                     changed = await call(
                         "update_document",
                         {
                             "document_id": doc["id"],
                             "expected_revision": current["revision"],
-                            "text": "修改后的文件内容。",
+                            "text": new_text,
                         },
                     )
                     assert changed["status"] == "queued"
+                    assert (await call("read_document", {"document_id": doc["id"]}))["text"] == original_text
                     assert worker.tick()
                     current = await call("get_document", {"document_id": doc["id"]})
+                    assert (await call("read_document", {"document_id": doc["id"]}))["text"] == new_text
+                    found = await call("search", {"query": "NOTE-2026-119", "mode": "keyword"})
+                    assert found["results"][0]["document_id"] == doc["id"]
+                    assert not (await call("search", {"query": "HT-2026-018", "mode": "keyword"}))["results"]
                     await call(
                         "delete_document",
                         {"document_id": doc["id"], "expected_revision": current["revision"]},
                     )
                     assert (await call("list_documents", {"knowledge_base_id": base["id"]}))["total"] == 0
+                    # 一次 MCP 调用提交图片与正文，不走 HTTP 上传，也不依赖自动 OCR。
+                    image = await call(
+                        "create_image_document",
+                        {
+                            "knowledge_base_id": base["id"],
+                            "name": "学习图片.png",
+                            "text": "配图讲解：TCP 重传机制 IMAGE-NOTE-119。\n保留换行。",
+                            "image_base64": base64.b64encode(
+                                (Path(__file__).parent / "fixtures" / "ocr-note.png").read_bytes()
+                            ).decode(),
+                            "request_id": "image-note-1",
+                        },
+                    )
+                    assert worker.tick()
+                    body = await call("read_document", {"document_id": image["id"]})
+                    assert body["source"] == "provided" and "保留换行。" in body["text"]
+                    assert (await call("search", {"query": "IMAGE-NOTE-119", "mode": "keyword"}))["results"][
+                        0
+                    ]["document_id"] == image["id"]
+                    image_meta = await call("get_document", {"document_id": image["id"]})
+                    assert image_meta["text_source"] == "provided"
+                    await call(
+                        "delete_document",
+                        {"document_id": image["id"], "expected_revision": image_meta["revision"]},
+                    )
                     await call(
                         "delete_knowledge_base",
                         {"knowledge_base_id": base["id"], "expected_revision": base["revision"]},

@@ -172,7 +172,7 @@ class Service:
         # 重放创建请求时，不能恢复对后来已删除资源的访问。
         if action == "create_knowledge_base":
             self.access.knowledge_base(session, principal, key, result["id"])
-        elif action == "create_document":
+        elif action in {"create_document", "create_image_document"}:
             self.access.document(session, principal, key, result["id"])
 
     def receive_upload(self, token: str, body: bytes) -> dict:

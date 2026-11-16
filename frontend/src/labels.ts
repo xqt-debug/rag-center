@@ -11,6 +11,7 @@ export const statusLabels: Record<string, string> = {
   chunking: '分块中',
   indexing: '建立索引',
   ready: '索引已完成',
+  stored: '已保存（未识别到文字）',
   failed: '索引失败',
   cancelled: '已取消',
 }

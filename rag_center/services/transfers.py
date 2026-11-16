@@ -97,6 +97,7 @@ class TransferOperations(Operations):
         doc = self.access.document(session, principal, key, args.document_id)
         version_id = doc.current_version or doc.latest_version
         require(version_id, "not_found", "原文件不存在", 404)
+        version = session.get(DocumentVersion, version_id)
         token = self.signer.dumps(
             {
                 "document_id": doc.id,
@@ -109,7 +110,8 @@ class TransferOperations(Operations):
         return {
             "url": f"{self.settings.public_url}/api/transfers/download/{token}",
             "expires_in": 300,
-            "filename": doc.name,
+            # 替换为不同格式的新版本时，旧版仍可下载；扩展名必须对应实际字节。
+            "filename": str(Path(doc.name).with_suffix(Path(version.filename).suffix)),
             "version_id": version_id,
         }
 
@@ -134,4 +136,4 @@ class TransferOperations(Operations):
             )
             version = session.get(DocumentVersion, data["version_id"])
             require(version and Path(version.path).is_file(), "not_found", "原文件不存在", 404)
-            return version.path, doc.name
+            return version.path, str(Path(doc.name).with_suffix(Path(version.filename).suffix))

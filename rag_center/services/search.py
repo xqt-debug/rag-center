@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from .. import schemas
 from ..auth import Principal
 from ..errors import DomainError, require
+from ..media import is_image
 from ..models import ApiKey, Chunk, Document, DocumentVersion, KnowledgeBase
 from ..retrieval import cosine, tokenize
 from .resources import Operations
@@ -104,6 +105,7 @@ class SearchOperations(Operations):
             if per_doc.get(chunk.document_id, 0) >= 3 or budget <= 0:
                 continue
             doc = session.get(Document, chunk.document_id)
+            version = session.get(DocumentVersion, chunk.version_id)
             content = chunk.text[:budget]
             results.append(
                 {
@@ -114,7 +116,7 @@ class SearchOperations(Operations):
                     "title": doc.name,
                     "page": chunk.page,
                     "text": content,
-                    "citation": f"{doc.name}，第{chunk.page}页"
+                    "citation": f"{doc.name}，第{chunk.page}{'帧' if is_image(version.filename) else '页'}"
                     if chunk.page
                     else f"{doc.name}，片段{chunk.ordinal + 1}",
                 }

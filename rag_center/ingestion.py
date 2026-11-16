@@ -7,6 +7,8 @@ from pathlib import Path
 from pypdf import PdfReader
 
 from .errors import require
+from .media import is_image, validate_image
+from .ocr import extract_image_text
 
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 120
@@ -31,6 +33,9 @@ class ParsedDocument:
 def parse_document(path: str, filename: str) -> ParsedDocument:
     """保留 PDF 的物理页码，即使空白页未提取出文本也不重新编号。"""
     body = Path(path).read_bytes()
+    if is_image(filename):
+        validate_image(filename, body)
+        return ParsedDocument(extract_image_text(body), page_count=0)
     if Path(filename).suffix.lower() != ".pdf":
         text = body.decode("utf-8-sig")
         require(text.strip(), "empty_document", "文件没有可检索文本")

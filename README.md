@@ -6,6 +6,8 @@
 
 产品需求见 [documents/PRD.md](documents/PRD.md)，当前实现边界见 [documents/IMPLEMENTATION.md](documents/IMPLEMENTATION.md)。
 
+支持 TXT、Markdown、文本 PDF，以及 PNG、JPEG、GIF、WebP、BMP 图片；网页可直接粘贴纯文本保存为 `.txt` 或 `.md`。
+
 代码职责、扩展方式和关键并发约束见 [维护指南](documents/MAINTAINING.md)。
 
 ## 本地启动（Windows PowerShell）
@@ -66,6 +68,16 @@ RAG_EMBEDDING_DIMENSIONS=1024
 
 `local-test` 仅供显式启用的离线流程测试，使用分词哈希向量，**不具备真实语义理解能力**。历史测试记录显示“测试索引（非模型）”，不计入真实索引完成数量；配置真实服务并重启后可直接重建。
 
+### 图片、动图与 OCR
+
+图片上传后由本地 RapidOCR（`rapidocr-onnxruntime`，模型随依赖包提供）识别中英文，无需 OCR API Key。识别出的文字沿用现有分块、关键词和文本向量检索；向量服务仍需上面的配置。图片保留原始字节，预览和下载不会转码，GIF 动画完整保留。MCP 使用原有上传、下载、读取和搜索工具管理图片，`read_document` 返回识别文字。
+
+GIF 等多帧图片最多均匀抽取 12 帧（包括首尾帧），重复整帧文字去重，引用记录实际帧号；短暂出现的文字可能遗漏。静态图片识别整张图。识别副本最大边长 2500 像素，不修改原文件。OCR 不等于图片语义理解，不保证手写文字、公式或表格结构识别准确，请核对原图。
+
+无可识别文字时显示“已保存（未识别到文字）”，可预览和下载，不建立空向量、不计入索引完成；OCR 或向量服务失败会显示失败原因，原图仍可下载并重试。此功能暂不为扫描 PDF 添加 OCR。
+
+原图预览使用与下载相同的 5 分钟短期凭证，可点击“刷新图片预览”续取；每次访问仍检查密钥撤销、文件删除和版本变化。上传限制：单帧最多 2000 万像素、最多 300 帧、累计最多 1.2 亿像素，单文件大小仍受 `RAG_MAX_FILE_MB` 限制。
+
 ### 配置短信
 
 第一版通过可替换 HTTPS webhook 接短信网关。请求为 `POST`，使用 `Authorization: Bearer <RAG_SMS_WEBHOOK_TOKEN>`，JSON 为 `phone`、`code`、`expires_in`；返回 2xx 表示发送成功。
@@ -95,15 +107,48 @@ RAG_SMS_WEBHOOK_TOKEN=your-gateway-secret
 }
 ```
 
-提供 17 个工具，涵盖知识库 CRUD、文件 CRUD、上传下载、任务查询与重试、混合检索和片段展开。创建、更新、删除等写入支持 `request_id`，重复请求使用相同标识和参数；更新／删除需先读取资源并提供 `expected_revision`。
+提供 18 个工具，涵盖知识库 CRUD、文件 CRUD、图文联合保存、上传下载、任务查询与重试、混合检索和片段展开。创建、更新、删除等写入支持 `request_id`，重复请求使用相同标识和参数；更新／删除需先读取资源并提供 `expected_revision`。
 
 - 小型 TXT／Markdown：直接通过 `create_document(text=...)` 或 `update_document(text=...)` 传入全文。
+
+纯文本无需本地文件或上传步骤。例如调用 MCP 工具 `create_document`：
+
+```json
+{
+  "knowledge_base_id": "已有知识库的 ID",
+  "name": "学习笔记.txt",
+  "text": "TCP 通过重传机制保证可靠传输。\n这是第二行笔记。",
+  "request_id": "note-create-001"
+}
+```
+
+`text` 最多 200000 个字符，不要同时传 `upload_id`。创建后用返回的 `job_id` 调用 `get_ingestion_job`；就绪后用 `read_document(document_id=...)` 直接读取正文，用 `search` 检索。读取结果的 `next_offset` 非空时，将它作为下一次的 `offset` 继续读取。修改时先调用 `get_document` 获取最新 `revision`，再通过 `update_document` 提交 `document_id`、`expected_revision` 和完整 `text`。保存中文与换行，下载原文件时返回对应 UTF-8 文本。
 - PDF／大文件：`prepare_document_upload` → 对返回地址 HTTP PUT 原始字节 → 使用 `upload_id` 创建或更新文件。
 - 下载：`download_document` 获取短期链接，再 HTTP GET。会重新检查资源状态和密钥权限，删除、撤销或版本变化后拒绝旧链接。
 - 创建与替换内容是异步任务，通过 `get_ingestion_job` 轮询进度。
 - 远程服务不能读取客户端本地路径；PDF 上传下载要求 Agent 具备 HTTP 文件传输能力。
 
 仅 API 密钥认证已实现，OAuth 授权流程暂未接入。自动测试使用官方 Python MCP 客户端通过真实 HTTP 完成管理流程；未承诺所有桌面 Agent 的配置兼容性。
+
+### MCP 同时保存图片与文字
+
+调用 `create_image_document`，具备 `create` 权限且获授权的知识库即可使用。一次调用提交小图片与对应正文：
+
+```json
+{
+  "knowledge_base_id": "已有知识库的 ID",
+  "name": "握手流程.png",
+  "image_base64": "图片原始字节的标准 Base64 编码，不含 data: 前缀",
+  "text": "TCP 三次握手：客户端发送 SYN，服务端返回 SYN+ACK，客户端发送 ACK。",
+  "request_id": "image-note-001"
+}
+```
+
+也可先调用 `prepare_document_upload`、HTTP PUT 原始图片，再将上例中的 `image_base64` 替换为 `upload_id`，避免大图片占用 Agent 上下文。两种图片来源必须且只能提供一个。支持 PNG/JPEG/GIF/WebP/BMP，文字非空且最多 200000 字符；Base64 字段最多 28000000 字符，解码后的图片仍受服务器单文件上限与真实格式校验。
+
+此接口直接使用传入文字建立索引，**不会再次 OCR 覆盖**；原始图片字节（含 GIF 动画）保持不变。图片和文字在同一文档版本中持久化，重启、失败重试和模型重建都保留文字，图片与 UTF-8 配套文字大小一同计入存储配额。返回 `job_id` 后用 `get_ingestion_job` 查询进度，就绪后用 `read_document` 读取正文、`search` 检索、`download_document` 下载原图。元数据 `text_source=provided` 表示调用方正文，网页预览会区分其与自动 OCR 文字。
+
+升级需要运行 `.venv\Scripts\python.exe -m alembic upgrade head`，应用 `0004` 可空正文列；既有图片继续自动 OCR，既有文本与索引不变。普通自动 OCR 图片仍使用 `create_document(upload_id=...)`。
 
 ## 验证
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import time
 from pathlib import Path
@@ -11,7 +13,8 @@ from sqlalchemy.orm import Session
 
 from .. import schemas
 from ..auth import Principal
-from ..errors import require
+from ..errors import DomainError, require
+from ..media import is_image
 from ..models import ApiKey, Document, DocumentVersion, Job, Upload, uid
 from .resources import Operations
 from .serializers import document_json, index_details
@@ -53,13 +56,18 @@ class DocumentOperations(Operations):
         self.storage.validate_content(name, body)
         return name, body, None
 
-    def _version(self, session, principal, doc, filename, body, path):
+    def _version(self, session, principal, doc, filename, body, path, provided_text=None):
         """将新版本加入处理队列，保留当前可搜索版本。
 
         文件系统写入无法随 SQL 事务回滚；写入后失败可能留下未被引用的源文件。
         回滚时不能直接删除已有上传对象，避免误删仍被其他版本引用的文件。
         """
         content_hash = hashlib.sha256(body).hexdigest()
+        if provided_text is not None:
+            # 同一图片配不同文字必须使用不同缓存键，避免复用其他说明的向量。
+            content_hash = hashlib.sha256(
+                b"image-text-v1\0" + bytes.fromhex(content_hash) + provided_text.encode("utf-8")
+            ).hexdigest()
         require(
             not doc.latest_version
             or session.get(DocumentVersion, doc.latest_version).content_hash != content_hash
@@ -68,7 +76,8 @@ class DocumentOperations(Operations):
             "内容未发生变化，无需重新建立索引",
             409,
         )
-        self.quota.check(session, principal, len(body))
+        size = len(body) + (len(provided_text.encode("utf-8")) if provided_text is not None else 0)
+        self.quota.check(session, principal, size)
         if path is None:
             path = str((self.settings.storage_dir / f"{uid()}.source").resolve())
             Path(path).write_bytes(body)
@@ -76,8 +85,9 @@ class DocumentOperations(Operations):
             document_id=doc.id,
             filename=filename,
             path=path,
-            size=len(body),
+            size=size,
             content_hash=content_hash,
+            provided_text=provided_text,
             embedding_profile=self.embedder.profile,
         )
         session.add(version)
@@ -99,18 +109,53 @@ class DocumentOperations(Operations):
     def create_document(
         self, session: Session, principal: Principal, key: ApiKey | None, args: schemas.DocCreate
     ) -> dict:
-        self.storage.validate_filename(args.name)
-        self.quota.check(session, principal, 0, new_document=True)
         filename, body, path = self._source(session, principal, args)
+        return self._create_document(
+            session, principal, args.name, args.knowledge_base_id, filename, body, path
+        )
+
+    def _create_document(self, session, principal, name, kb_id, filename, body, path, provided_text=None):
+        self.storage.validate_filename(name)
+        self.quota.check(session, principal, 0, new_document=True)
         require(
-            Path(args.name).suffix.lower() == Path(filename).suffix.lower(),
+            Path(name).suffix.lower() == Path(filename).suffix.lower(),
             "invalid_filename",
             "显示名称的扩展名必须与原文件类型一致",
         )
-        doc = Document(user_id=principal.user_id, kb_id=args.knowledge_base_id, name=args.name)
+        doc = Document(user_id=principal.user_id, kb_id=kb_id, name=name)
         session.add(doc)
         session.flush()
-        return self._version(session, principal, doc, filename, body, path)
+        return self._version(session, principal, doc, filename, body, path, provided_text)
+
+    def create_image_document(
+        self, session: Session, principal: Principal, key: ApiKey | None, args: schemas.ImageDocCreate
+    ) -> dict:
+        self.storage.validate_filename(args.name)
+        require(is_image(args.name), "unsupported_type", "此接口仅支持图片和配套文字")
+        require(args.text.strip(), "empty_document", "图片配套文字不能为空或仅含空白")
+        require("\x00" not in args.text, "invalid_input", "图片配套文字不能包含空字符")
+        if args.upload_id:
+            filename, body, path = self._source(session, principal, args)
+            require(is_image(filename), "unsupported_type", "上传对象必须是图片")
+        else:
+            # 在解码前按服务器文件上限限制输入，避免 Base64 放大带来的无界分配。
+            require(
+                len(args.image_base64) <= 4 * ((self.settings.max_file_mb * 1024**2 + 2) // 3),
+                "file_too_large",
+                "图片超过文件大小限制",
+                413,
+            )
+            try:
+                body = base64.b64decode(args.image_base64, validate=True)
+            except (binascii.Error, ValueError):
+                raise DomainError(
+                    "invalid_image_base64", "图片须为标准 Base64 编码，不含 data: 前缀"
+                ) from None
+            self.storage.validate_content(args.name, body)
+            filename, path = args.name, None
+        return self._create_document(
+            session, principal, args.name, args.knowledge_base_id, filename, body, path, args.text
+        )
 
     def list_documents(
         self, session: Session, principal: Principal, key: ApiKey | None, args: schemas.DocList
@@ -152,6 +197,11 @@ class DocumentOperations(Operations):
             "offset": args.offset,
             "next_offset": end if end < len(version.text) else None,
             "total_characters": len(version.text),
+            "source": "provided"
+            if version.provided_text is not None
+            else "ocr"
+            if is_image(version.filename)
+            else "text",
         }
 
     def update_document(
@@ -211,6 +261,12 @@ class DocumentOperations(Operations):
         doc = self.access.document(session, principal, key, args.document_id)
         version = session.get(DocumentVersion, doc.latest_version)
         require(version is not None, "invalid_state", "文件没有可处理的版本", 409)
+        require(
+            version.status != "stored",
+            "no_searchable_text",
+            "图片已保存但未识别出文字，请上传更清晰的图片或替换内容",
+            409,
+        )
         if version.status == "ready":
             require(
                 index_details(version, self.embedder.profile)["needs_reindex"],
@@ -222,7 +278,13 @@ class DocumentOperations(Operations):
             # 旧版本继续供关键词检索，新模型索引成功发布后再切换。
             doc.revision += 1
             return self._version(
-                session, principal, doc, version.filename, Path(version.path).read_bytes(), version.path
+                session,
+                principal,
+                doc,
+                version.filename,
+                Path(version.path).read_bytes(),
+                version.path,
+                version.provided_text,
             )
         require(version.status == "failed", "invalid_state", "仅能重试失败或需要重建的版本", 409)
         if self.settings.embedding_provider == "openai-compatible":
