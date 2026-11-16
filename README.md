@@ -10,6 +10,8 @@
 
 代码职责、扩展方式和关键并发约束见 [维护指南](documents/MAINTAINING.md)。
 
+GitHub 自动测试、Docker 镜像构建及 Steam Deck 自动部署见 [Steam Deck 部署指南](documents/STEAMDECK_DEPLOYMENT.md)。
+
 ## 本地启动（Windows PowerShell）
 
 需要 Python 3.11+、uv、Node.js 20.19+ 或 22.12+，以及运行中的 Docker Desktop。

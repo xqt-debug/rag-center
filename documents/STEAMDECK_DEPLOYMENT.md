@@ -1,120 +1,68 @@
-# GitHub Actions 自动部署到 Steam Deck
+# Steam Deck CI/CD
 
-仓库：`xqt-debug/rag-center`。目标为 Steam Deck（Linux / x86-64），已安装 Docker Engine 和 Docker Compose v2。
+## 流程与边界
 
-## 工作流程
+PR 与 main 在 GitHub 托管 runner 执行 Ruff、SQLite/PostgreSQL 测试、前端测试和构建。
+部署配置任务执行 actionlint（含上下文/表达式检查）、bash -n、ShellCheck、Compose config，以及真实 deploy.sh 的 Docker 故障注入测试。
+镜像在 GitHub 构建 linux/amd64，在镜像内验证迁移、OCR 和前端 HTTP；全部通过后才推送同一个已测试镜像到 GHCR，输出注册表 sha256 摘要。
 
-1. PR 和 `main` 推送：GitHub 执行 Ruff、SQLite 和 PostgreSQL 全部后端测试，以及前端测试、格式检查、类型检查和构建。
-2. 测试通过后，在 GitHub 构建包含前端、API 和本地 OCR 的 `linux/amd64` 镜像，并验证容器内迁移、OCR 模型加载和前端文件。PR 只验证；`main` 发布到 GHCR。
-3. 启用部署后，Steam Deck 上带 `steamdeck` 标签的 runner 拉取这次构建的精确镜像摘要，备份数据库、停止 API/worker、迁移数据库，再启动并检查服务。
+Deck 不 checkout、不下载业务源码、不构建。它只通过 download-artifact 获取同次 workflow 的 compose.yaml、deploy.sh、docker-env.sh。凭据写入 RUNNER_TEMP 下的独立 DOCKER_CONFIG，链接用户已有 Compose 插件；登录动作退出及 always 清理步骤负责移除凭据和临时附件。
 
-默认不启用 CD，避免尚未注册 runner 时任务一直排队；CI 和镜像发布无需 Steam Deck 在线。Deck 只需要向外连接 GitHub、GHCR 和配置的向量服务，无需公网 IP 或端口转发。休眠/关机时 runner 离线，部署需要等设备恢复在线；不要为此修改 SteamOS 系统分区。
+## 现有实例
 
-## 一、注册 Steam Deck runner
+默认目录 /home/deck/rag-center-deploy，Compose 项目 rag-center；数据库容器 rag-center-db-1，pgvector/pgvector:pg17，用户和库名 rag。
+部署预检要求数据库已健康，且数据挂载源恰为该目录的 postgres；不会创建或重建数据库。
 
-在 Deck 桌面模式的 Konsole 中确认：
+- .env：POSTGRES_PASSWORD、RAG_BIND_IP；保留 Deck 已有随机值，权限 600。
+- app.env：RAG_* 应用参数、签名密钥、随机登录凭据和 Embedding 设置；保留原值，权限 600。
+- postgres/：绑定 /var/lib/postgresql/data；数据库无主机端口。
+- files/：绑定 /data/files；容器 user 0:0 通过 rootless 映射至主机 deck。
+- backups/：每次部署一个私有目录，包含数据库归档、文件、两个 env、原 Compose 和可用的原部署脚本、成功摘要。
 
+.env.example 与 app.env.example 只供新环境参考，流水线不会把它们下载到 Deck，也不会覆盖真实 env。
+当前验收为 development，PUBLIC_URL=http://192.168.31.72:8000，RAG_BIND_IP=192.168.31.72。
+Embedding Key 留空时实际索引明确失败；不回退 local-test。production 的 HTTPS、短信 webhook 和真实 Embedding 校验保持原样。
+
+## 部署顺序与失败语义
+
+1. 锁定部署目录，验证数据库身份、挂载和配置；拉取精确摘要镜像；检查应用设置和 files 写权限。此阶段不停止写入。
+2. 记录原运行容器 ID，停止 API 和 worker（60 秒宽限）。
+3. pg_dump -Fc，pg_restore --list 验证归档可读；打包并验证 files；复制原配置和签名密钥，写校验和与 COMPLETE 标记。
+4. 启动镜像内迁移，再启动 API/worker。迁移开始后失败，或启动/验收失败，停止两个写入服务，保留数据库和备份；不自动还原数据库或降级 schema。
+5. 检查 HTTP 健康、实际首页 HTML、users 表查询、数据库 revision 等于镜像迁移 heads；确认 worker 30 秒持续运行且无重启。全部成功后保存配置并原子更新 release.env。
+
+备份之前或备份中失败，可尝试 docker start 原容器 ID。不会用新镜像重建旧容器。
+INT/TERM 和普通错误通过 EXIT 处理；强制断电/SIGKILL 无法由脚本捕获，应人工确认两个写入服务状态。
+不执行 down -v、清空卷、删数据或数据库自动恢复。备份包含秘密，不能上传 Actions，也不要输出完整 Compose 配置或 env。
+
+## GitHub 设置
+
+在仓库 Settings → Secrets and variables → Actions → Variables 设置 STEAMDECK_DEPLOY_ENABLED=true。
+可选 STEAMDECK_DEPLOY_DIR 必须为现有部署目录绝对路径，默认 /home/deck/rag-center-deploy。
+Settings → Environments 创建 steamdeck，只允许 main 部署；如需无人值守，不设置人工审核。
+Settings → Actions → Runners 确认 runner 在线 Idle，包含 self-hosted、Linux、X64、steamdeck 标签。
+已有 /home/deck/actions-runner、rag-center-runner.service 和隐藏令牌输入的 register-runner.sh，应复用，不在聊天中粘贴注册令牌。
+
+Deck 上可执行以下只读检查：
 ```bash
-docker info
-docker compose version
-command -v bash flock openssl
+systemctl --user status rag-center-runner.service --no-pager
+systemctl --user status docker.service --no-pager
+/home/deck/bin/docker info
+/home/deck/.docker/cli-plugins/docker-compose version
 ```
 
-执行 runner 的用户必须能直接运行 `docker info`，不能依赖交互式 `sudo`。当前 Deck 使用 Rootless Docker，CLI 通常位于 `~/bin/docker`，服务端 socket 位于 `/run/user/$(id -u)/docker.sock`。部署脚本会在没有显式 Docker host/context 配置时自动识别该 socket。
+若尚未注册，在 Deck 本地运行已准备的 register-runner.sh，按提示隐藏输入 GitHub 页面生成的短期注册令牌，然后启动 rag-center-runner.service；不要改动 Codex、VS Code 服务或 SteamOS 只读保护。
 
-若还没有 Compose，可按 Docker 官方文档将 Linux x86-64 插件安装到 `~/.docker/cli-plugins/docker-compose`。流水线使用临时 `DOCKER_CONFIG` 保存本次 GHCR 登录信息，会自动链接用户目录中的 Compose 插件，避免出现终端能运行 Compose、runner 找不到插件的问题。
+GHCR 发布用作业 GITHUB_TOKEN 的 packages:write，拉取用 packages:read，不需要长期 PAT。
+若已有包返回 denied，在包 Settings → Manage Actions access 中给 xqt-debug/rag-center 仓库写入/读取权限。仓库或组织策略也须允许 packages 写入。
+部署关闭时 deploy 作业会 skipped；runner 离线时会 queued，不能视为部署成功。
 
-打开 GitHub 仓库 **Settings → Actions → Runners → New self-hosted runner**，选择 **Linux / x64**。在 Deck 的 `~/actions-runner` 下执行该页面生成的下载、解压和注册命令。注册时追加：
+## 运维
 
+成功后在部署目录运行：
 ```bash
-./config.sh --url https://github.com/xqt-debug/rag-center --token <页面生成的临时注册令牌> --labels steamdeck --name steamdeck
-```
-
-令牌只在 Deck 输入，不写进仓库或聊天。先运行 `./run.sh` 验证 GitHub 页面显示 Idle。
-
-注册成功后，可使用用户级 systemd 服务常驻，不需要把 runner 安装进只读系统分区：
-
-```bash
-mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/rag-center-runner.service <<'EOF'
-[Unit]
-Description=RAG Center GitHub Actions runner
-
-[Service]
-WorkingDirectory=%h/actions-runner
-ExecStart=%h/actions-runner/run.sh
-Environment="PATH=%h/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
-Environment="DOCKER_HOST=unix://%t/docker.sock"
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-EOF
-
-# 若之前前台运行 run.sh，先在原终端 Ctrl+C 停止，避免重复启动。
-systemctl --user daemon-reload
-systemctl --user enable --now rag-center-runner
-sudo loginctl enable-linger "$USER"
-systemctl --user status rag-center-runner
-```
-
-Rootless Docker 自身也需要开机启动：`systemctl --user enable --now docker`。若日后改用系统级 Docker，应同时移除 runner 服务中的 Rootless `DOCKER_HOST` 行，重新加载并重启 runner。
-
-Docker 的镜像拉取由后台 Docker 服务发起。终端中设置的 `http_proxy`/`https_proxy` 不会自动传给已运行的用户服务；若拉取 GHCR 或 Docker Hub 超时，应为 `docker.service` 单独配置代理并重启验证，而不是把代理订阅或凭据提交到仓库。
-
-如果注册页面提示缺少系统依赖，先根据实际报错处理；这里没有自动执行 `pacman` 或关闭 SteamOS 的只读保护。用户服务可以跨注销运行，但无法让关机或休眠中的设备执行任务。
-
-## 二、准备 Deck 上的独立配置
-
-创建 `~/apps/rag-center/.env`，内容按仓库 `deploy/steamdeck/.env.example` 填写。该配置只保留在 Deck，更新镜像时不会覆盖。
-
-```bash
-mkdir -p ~/apps/rag-center
-chmod 700 ~/apps/rag-center
-# 分别生成 RAG_SECRET 和 POSTGRES_PASSWORD，复制结果到 .env：
-openssl rand -hex 32
-openssl rand -hex 24
-```
-
-必须更换 `RAG_DEV_PASSWORD`、`RAG_SECRET`、`POSTGRES_PASSWORD`，并填入向量服务 API Key。数据库密码嵌入连接 URL，请使用生成的十六进制值，不要直接填包含 `@`、`:`、`/`、`#` 的密码。`.env` 中包含 `$` 等特殊字符的值应使用单引号包围，避免 Compose 插值。最后执行 `chmod 600 ~/apps/rag-center/.env`。
-
-默认使用现有的账号密码登录模式 `RAG_ENV=development`，绑定 `127.0.0.1:8000`，在 Deck 浏览器打开 `http://localhost:8000`。
-
-如需在自己电脑通过家庭局域网访问，修改：
-
-```dotenv
-RAG_BIND_ADDRESS=0.0.0.0
-RAG_PUBLIC_URL=http://你的Deck局域网IP:8000
-```
-
-这里的 development 模式包括测试验证码入口，只适用于本机或可信私网。正式公网部署需改为 production，配置 HTTPS 和真实短信 webhook，遵守现有 `Settings.validate_deployment()` 约束；本流程不会绕过这些检查。
-
-此部署使用独立命名的 `rag-center-steamdeck_postgres` 和 `rag-center-steamdeck_files` Docker 卷，不会自动迁移你 Windows 上现有的知识库和文件。首次部署是一套新实例。
-
-## 三、启用 GitHub 自动部署
-
-1. 将本次代码提交并推送至 `main`。打开 **Actions → CI and Steam Deck deployment**，确认测试与镜像任务成功。
-2. 在 **Settings → Actions → General** 允许仓库运行 GitHub Actions；组织策略若禁止写入 packages，需要放行本工作流的 `packages: write`。发布和拉取均使用当次自动生成的 `GITHUB_TOKEN`，无需长期 PAT。若已有同名 GHCR 包，须为本仓库授予该包的 Actions 读写权限。
-3. 在 **Settings → Secrets and variables → Actions → Variables** 新建仓库变量 `STEAMDECK_DEPLOY_ENABLED`，值为 `true`。可选变量 `STEAMDECK_DEPLOY_DIR` 用于自定义 Deck 上的绝对部署路径；默认 `~/apps/rag-center`。
-4. 在 **Settings → Environments** 配置 `steamdeck` 环境，仅允许 `main` 部署。需要完全自动时，不添加人工审批要求。
-5. 在 Actions 页面点 **Run workflow**，选择 `main`。之后每次推送 `main` 都自动执行测试、构建和部署。
-
-只有 `main` 的推送/手动运行会进入 Deck，PR 测试始终在 GitHub 托管机器执行；不要将部署触发器改为 `pull_request_target`，或让不受信任的分支在此 runner 上执行。能修改并推送 `main` 的人也能控制部署机器，应限制仓库写入权限。
-
-## 四、查看服务与处理失败
-
-成功部署后，脚本写入 `release.env`，记录上次成功的精确镜像摘要。Deck 上执行：
-
-```bash
-cd ~/apps/rag-center
+source ./docker-env.sh
 docker compose --env-file .env --env-file release.env ps
-docker compose --env-file .env --env-file release.env logs --tail=100 api worker
-curl --fail http://127.0.0.1:8000/api/health
 ```
 
-每次部署前在 `~/apps/rag-center/backups/` 生成 `pg_dump` 自定义格式备份。备份仅包含数据库，原始文件另存于 files 卷；应定期备份文件卷，并将数据库和文件副本同步到其他设备。备份不会自动清理，需关注磁盘剩余空间。脚本从不执行 `docker compose down -v` 或清空卷。
-
-迁移失败时 API 和 worker 保持停止，Actions 显示失败；不要在未知数据库状态下自动回退镜像或执行降级迁移。检查迁移日志并修复后重跑。启动失败也不会覆盖 `release.env`，但这不代表旧服务仍在运行。首次失败尚无 `release.env` 时，可从 Actions 日志取得该次摘要，再使用 `RAG_IMAGE='ghcr.io/…@sha256:…' docker compose --env-file .env logs --tail=100` 排查。
-
-本流程有短暂维护窗口，不提供无停机发布或数据库自动回滚。后台 worker 的启动状态以及 API 健康检查不代表外部向量 API 已可用；部署后应在网页上传一条测试笔记确认实际索引结果。
+失败时从对应 Actions 运行获得目标摘要，以 RAG_IMAGE 环境变量调用 Compose 检查状态。日志可能含业务信息，不应公开上传。只有 backups 下 COMPLETE 存在、校验和通过的目录才是完整配套备份。

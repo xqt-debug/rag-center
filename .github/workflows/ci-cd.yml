@@ -75,10 +75,20 @@ jobs:
       RAG_IMAGE: ghcr.io/xqt-debug/rag-center@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     steps:
       - uses: actions/checkout@v4
-      - run: bash -n deploy/steamdeck/deploy.sh && bash -n deploy/steamdeck/docker-env.sh
+      - name: Validate Actions expressions and shell scripts
+        run: |
+          curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz | tar -xz -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -shellcheck= -config-file .github/actionlint.yaml
+          bash -n deploy/steamdeck/deploy.sh
+          bash -n deploy/steamdeck/docker-env.sh
+          shellcheck -e SC1091 deploy/steamdeck/*.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m unittest discover -s deploy/tests -v
       - name: Validate deployment Compose without starting services
         run: |
-          cp deploy/steamdeck/.env.example deploy/steamdeck/.env
+          cp deploy/steamdeck/app.env.example deploy/steamdeck/app.env
           docker compose --env-file deploy/steamdeck/.env.example -f deploy/steamdeck/compose.yaml config --quiet
 
   image:
@@ -88,9 +98,20 @@ jobs:
     permissions:
       contents: read
       packages: write
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag
+          POSTGRES_DB: rag
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U rag -d rag"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     outputs:
       image: ${{ steps.name.outputs.image }}
-      digest: ${{ steps.build.outputs.digest }}
+      digest: ${{ steps.publish.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
       - name: Image name
@@ -99,19 +120,13 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: echo "image=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
         id: build
         with:
           context: .
           platforms: linux/amd64
           load: true
-          push: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+          push: false
           tags: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha
@@ -128,6 +143,52 @@ jobs:
               python -m alembic upgrade head
               python -c "from pathlib import Path; from rag_center.ingestion import parse_document; from rag_center.app import app; assert Path(\"/app/frontend/dist/index.html\").is_file(); assert \"TCP\" in parse_document(\"/fixtures/ocr-note.png\", \"note.png\").text; print(\"Container smoke passed\")"
             '
+      - name: Verify PostgreSQL migrations inside the runtime image
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}
+        run: |
+          docker run --rm --network host \
+            -e RAG_DATABASE_URL=postgresql+psycopg://rag:rag@127.0.0.1:5432/rag \
+            --entrypoint python "$IMAGE" -m alembic upgrade head
+      - name: Verify served frontend and HTTP health
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}
+        run: |
+          docker run -d --name smoke -e RAG_DATABASE_URL=sqlite:////app/data/http.sqlite "$IMAGE"
+          trap 'docker rm -f smoke >/dev/null' EXIT
+          for attempt in {1..40}; do
+            if docker exec smoke python -c 'import urllib.request; r=urllib.request.urlopen("http://127.0.0.1:8000/"); assert "text/html" in r.headers["Content-Type"]; assert "<html" in r.read().decode().lower(); urllib.request.urlopen("http://127.0.0.1:8000/api/health")'; then
+              exit 0
+            fi
+            sleep 3
+          done
+          exit 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: steamdeck-deployment
+          path: |
+            deploy/steamdeck/compose.yaml
+            deploy/steamdeck/deploy.sh
+            deploy/steamdeck/docker-env.sh
+          if-no-files-found: error
+          retention-days: 7
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the exact tested image
+        id: publish
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}
+        run: |
+          docker push "$IMAGE"
+          ref=$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}')
+          digest=${ref##*@}
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   deploy:
     needs: image
@@ -143,10 +204,10 @@ jobs:
     permissions:
       contents: read
       packages: read
+      actions: read
     env:
       RAG_DEPLOY_DIR: ${{ vars.STEAMDECK_DEPLOY_DIR }}
       RAG_IMAGE: ${{ needs.image.outputs.image }}@${{ needs.image.outputs.digest }}
-      DOCKER_CONFIG: ${{ runner.temp }}/rag-center-docker-${{ github.run_id }}
     steps:
       - name: Skip superseded main commits
         id: current
@@ -159,15 +220,24 @@ jobs:
               ref: 'heads/main'
             });
             core.setOutput('current', data.object.sha === context.sha ? 'true' : 'false');
-      - uses: actions/checkout@v4
-        if: steps.current.outputs.current == 'true'
-        with:
-          persist-credentials: false
-      - name: Prepare Rootless Docker and the user's Compose plugin
+      - name: Prepare temporary deployment and credential directories
         if: steps.current.outputs.current == 'true'
         shell: bash
         run: |
-          source deploy/steamdeck/docker-env.sh
+          umask 077
+          config=$(mktemp -d "$RUNNER_TEMP/rag-docker.XXXXXX")
+          bundle=$(mktemp -d "$RUNNER_TEMP/rag-deploy.XXXXXX")
+          printf 'DOCKER_CONFIG=%s\nDEPLOY_BUNDLE=%s\n' "$config" "$bundle" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        if: steps.current.outputs.current == 'true'
+        with:
+          name: steamdeck-deployment
+          path: ${{ env.DEPLOY_BUNDLE }}
+      - name: Prepare Rootless Docker and Compose
+        if: steps.current.outputs.current == 'true'
+        shell: bash
+        run: |
+          source "$DEPLOY_BUNDLE/docker-env.sh"
           printf '%s\n' "$HOME/bin" "$HOME/.local/bin" >> "$GITHUB_PATH"
           if [[ -n "${DOCKER_HOST:-}" ]]; then
             printf 'DOCKER_HOST=%s\n' "$DOCKER_HOST" >> "$GITHUB_ENV"
@@ -182,4 +252,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Pull, back up, migrate and deploy
         if: steps.current.outputs.current == 'true'
-        run: bash deploy/steamdeck/deploy.sh "$RAG_IMAGE"
+        shell: bash
+        run: bash "$DEPLOY_BUNDLE/deploy.sh" "$RAG_IMAGE"
+      - name: Remove temporary credentials and deployment attachment
+        if: always()
+        shell: bash
+        run: |
+          for path in "${DOCKER_CONFIG:-}" "${DEPLOY_BUNDLE:-}"; do
+            case "$path" in
+              "$RUNNER_TEMP"/rag-docker.*|"$RUNNER_TEMP"/rag-deploy.*) rm -rf -- "$path" ;;
+            esac
+          done

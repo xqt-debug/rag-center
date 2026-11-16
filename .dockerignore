@@ -1,0 +1,15 @@
+*
+!pyproject.toml
+!uv.lock
+!alembic.ini
+!rag_center/
+!rag_center/**
+!migrations/
+!migrations/**
+!frontend/
+!frontend/**
+frontend/node_modules/
+frontend/dist/
+**/__pycache__/
+**/*.pyc
+**/.env*

@@ -1,0 +1,56 @@
+name: rag-center
+
+x-app: &app
+  image: ${RAG_IMAGE:?Set the published GHCR digest}
+  user: "0:0"
+  env_file: [app.env]
+  environment:
+    RAG_DATABASE_URL: postgresql+psycopg://rag:${POSTGRES_PASSWORD:?Set a URL-safe password}@db:5432/rag
+    RAG_STORAGE_DIR: /data/files
+  volumes:
+    - ./files:/data/files
+  init: true
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_DB: rag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - ./postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U rag -d rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  migrate:
+    <<: *app
+    profiles: [tools]
+    command: [python, -m, alembic, upgrade, head]
+    healthcheck:
+      disable: true
+  api:
+    <<: *app
+    restart: unless-stopped
+    ports:
+      - "${RAG_BIND_IP:?Set RAG_BIND_IP}:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+  worker:
+    <<: *app
+    restart: unless-stopped
+    command: [python, -m, rag_center.worker]
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy

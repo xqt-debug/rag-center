@@ -3,46 +3,119 @@ set -Eeuo pipefail
 umask 077
 
 image=${1:?Usage: bash deploy.sh ghcr.io/owner/repo@sha256:digest}
-if [[ ! "$image" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]]; then
-  echo 'Expected an immutable GHCR image digest.' >&2
-  exit 1
-fi
-deploy_dir=${RAG_DEPLOY_DIR:-"$HOME/apps/rag-center"}
+[[ "$image" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || {
+  echo 'Expected an immutable GHCR image digest.' >&2; exit 1;
+}
+deploy_dir=${RAG_DEPLOY_DIR:-/home/deck/rag-center-deploy}
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck source=docker-env.sh
 source "$source_dir/docker-env.sh"
-mkdir -p -- "$deploy_dir"
+[[ "$deploy_dir" = /* && -d "$deploy_dir" ]] || {
+  echo 'Existing absolute deployment directory required.' >&2; exit 1;
+}
 deploy_dir=$(cd -- "$deploy_dir" && pwd)
 exec 9>"$deploy_dir/.deploy.lock"
 flock -n 9 || { echo 'Another deployment is running.' >&2; exit 1; }
-if [[ ! -f "$deploy_dir/.env" ]]; then
-  echo "Create $deploy_dir/.env using deploy/steamdeck/.env.example before deploying." >&2
-  exit 1
-fi
-chmod 600 "$deploy_dir/.env"
+for config in .env app.env compose.yaml; do
+  [[ -f "$deploy_dir/$config" && ! -L "$deploy_dir/$config" ]] || {
+    echo "Missing regular deployment file: $config" >&2; exit 1;
+  }
+done
+chmod 600 "$deploy_dir/.env" "$deploy_dir/app.env"
+[[ -d "$deploy_dir/postgres" && -d "$deploy_dir/files" ]] || {
+  echo 'Existing postgres and files directories required.' >&2; exit 1;
+}
 docker info >/dev/null
 docker compose version >/dev/null
-cp -- "$source_dir/compose.yaml" "$deploy_dir/compose.yaml"
 export RAG_IMAGE="$image"
-compose=(docker compose --project-name rag-center-steamdeck --project-directory "$deploy_dir"
-  --env-file "$deploy_dir/.env" -f "$deploy_dir/compose.yaml")
+compose=(docker compose --project-name rag-center --project-directory "$deploy_dir"
+  --env-file "$deploy_dir/.env" -f "$source_dir/compose.yaml")
 "${compose[@]}" config --quiet
-"${compose[@]}" --profile tools pull
-"${compose[@]}" up -d --wait --wait-timeout 120 db
+# Refuse a new/foreign database. Never recreate the existing database here.
+db_id=$("${compose[@]}" ps -q db)
+[[ -n "$db_id" && "$(docker inspect -f '{{.State.Health.Status}}' "$db_id")" = healthy ]]
+[[ "$(docker inspect -f '{{.Name}}' "$db_id")" = /rag-center-db-1 ]]
+[[ "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Source}}{{end}}{{end}}' "$db_id")" = "$deploy_dir/postgres" ]]
+"${compose[@]}" --profile tools pull api worker migrate
+# Check settings and rootless bind permissions before stopping writers.
+"${compose[@]}" run --rm --no-deps migrate python -c '
+from pathlib import Path
+from rag_center.config import get_settings
+s = get_settings(); s.validate_deployment()
+p = Path(s.storage_dir) / ".deploy-write-check"; p.write_text("ok"); p.unlink()
+'
 
-# Back up the database before changing its schema. Source images live in a separate persistent volume.
-mkdir -p -- "$deploy_dir/backups"
-backup="$deploy_dir/backups/$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID:-manual}-$$.dump"
-"${compose[@]}" exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$backup"
-test -s "$backup"
-echo "Database backup saved: $backup"
+phase=stopping
+old_ids=$("${compose[@]}" ps --status running -q api worker)
+on_exit() {
+  code=$?
+  trap - EXIT INT TERM
+  if (( code == 0 )); then return; fi
+  if [[ "$phase" = stopping || "$phase" = backup ]]; then
+    # Restart original IDs, never recreate with the new image.
+    if [[ -n "$old_ids" ]]; then
+      while IFS= read -r container; do docker start "$container" >/dev/null || true; done <<< "$old_ids"
+    fi
+    echo 'Pre-migration failure; attempted to restart original writers.' >&2
+  else
+    "${compose[@]}" stop api worker >/dev/null 2>&1 || true
+    echo 'Migration/start/acceptance failed; writers stopped. Database and backups retained.' >&2
+  fi
+  exit "$code"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"${compose[@]}" stop -t 60 api worker
+phase=backup
+backup="$deploy_dir/backups/$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID:-manual}-$$"
+mkdir -p -- "$backup"
+"${compose[@]}" exec -T db pg_dump -U rag -d rag -Fc > "$backup/database.dump"
+test -s "$backup/database.dump"
+"${compose[@]}" exec -T db pg_restore --list < "$backup/database.dump" > "$backup/database.list"
+test -s "$backup/database.list"
+tar -C "$deploy_dir" -czf "$backup/files.tar.gz" files
+tar -tzf "$backup/files.tar.gz" >/dev/null
+cp -- "$deploy_dir/.env" "$deploy_dir/app.env" "$deploy_dir/compose.yaml" "$backup/"
+for config in release.env deploy.sh docker-env.sh; do
+  if [[ -f "$deploy_dir/$config" ]]; then cp -- "$deploy_dir/$config" "$backup/"; fi
+done
+(cd -- "$backup" && sha256sum database.dump files.tar.gz .env app.env compose.yaml > SHA256SUMS && sha256sum --check --status SHA256SUMS)
+touch "$backup/COMPLETE"
 
-# Stop both writers before migration. A failed migration leaves them stopped for inspection.
-"${compose[@]}" stop api worker
+phase=migration
 "${compose[@]}" run --rm --no-deps migrate
-"${compose[@]}" up -d --wait --wait-timeout 180 api worker
-"${compose[@]}" exec -T api python -c \
-  'from rag_center.config import get_settings; from sqlalchemy import create_engine, text; engine = create_engine(get_settings().database_url); connection = engine.connect(); connection.execute(text("SELECT 1")); connection.close(); engine.dispose()'
-printf 'RAG_IMAGE=%s\n' "$image" > "$deploy_dir/release.env"
-"${compose[@]}" ps
-echo "Deployed $image"
+phase=start
+"${compose[@]}" up -d --no-deps --wait --wait-timeout 180 api worker
+"${compose[@]}" exec -T api python -c '
+import urllib.request
+from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
+from sqlalchemy import create_engine, text
+from rag_center.config import get_settings
+with urllib.request.urlopen("http://127.0.0.1:8000/api/health", timeout=5) as r:
+    assert r.status == 200
+with urllib.request.urlopen("http://127.0.0.1:8000/", timeout=5) as r:
+    assert "text/html" in r.headers.get("Content-Type", "")
+    assert "<html" in r.read().decode().lower()
+engine = create_engine(get_settings().database_url)
+with engine.connect() as c:
+    assert c.execute(text("SELECT count(*) FROM users")).scalar() >= 0
+    assert set(MigrationContext.configure(c).get_current_heads()) == set(ScriptDirectory.from_config(Config("alembic.ini")).get_heads())
+engine.dispose()
+'
+worker=$("${compose[@]}" ps -q worker)
+[[ -n "$worker" ]]
+initial=$(docker inspect -f '{{.State.StartedAt}} {{.RestartCount}}' "$worker")
+sleep "${RAG_WORKER_STABILITY_SECONDS:-30}"
+[[ "$(docker inspect -f '{{.State.Running}}' "$worker")" = true ]]
+[[ "$(docker inspect -f '{{.State.StartedAt}} {{.RestartCount}}' "$worker")" = "$initial" ]]
+"${compose[@]}" exec -T api python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/api/health", timeout=5)'
+if [[ "$source_dir" != "$deploy_dir" ]]; then
+  cp -- "$source_dir/compose.yaml" "$deploy_dir/compose.yaml"
+  cp -- "$source_dir/deploy.sh" "$source_dir/docker-env.sh" "$deploy_dir/"
+fi
+printf 'RAG_IMAGE=%s\n' "$image" > "$deploy_dir/release.env.tmp"
+mv -- "$deploy_dir/release.env.tmp" "$deploy_dir/release.env"
+trap - EXIT INT TERM
+echo "Deployed $image; coordinated backup: $backup"

@@ -228,3 +228,10 @@ test-results/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# Deployment secrets and persistent state
+app.env
+release.env
+backups/
+postgres/
+files/
