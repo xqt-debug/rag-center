@@ -29,6 +29,25 @@ test('writes include session credentials, CSRF and an idempotency identifier', a
   assert.equal(JSON.parse(request.body).text, 'private text')
 })
 
+test('revoke requests work without randomUUID on LAN HTTP pages', async (t) => {
+  const descriptor = Object.getOwnPropertyDescriptor(crypto, 'randomUUID')
+  Object.defineProperty(crypto, 'randomUUID', { configurable: true, value: undefined })
+  t.after(() => {
+    if (descriptor) Object.defineProperty(crypto, 'randomUUID', descriptor)
+    else delete crypto.randomUUID
+  })
+  const fetch = mock.method(globalThis, 'fetch', async () => Response.json({ ok: true }))
+  await action('revoke_api_key', { key_id: 'key-1' }, true)
+  await action('revoke_api_key', { key_id: 'key-2' }, true)
+  const requests = fetch.mock.calls.map((call) => call.arguments[1])
+  const ids = requests.map((request) => request.headers['Idempotency-Key'])
+  for (const id of ids) {
+    assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  }
+  assert.notEqual(ids[0], ids[1])
+  assert.equal(JSON.parse(requests[0].body).key_id, 'key-1')
+})
+
 test('proxy HTML errors produce a readable error instead of a JSON parser failure', async () => {
   mock.method(
     globalThis,

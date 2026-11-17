@@ -64,13 +64,19 @@ export async function api<T = unknown>(
   return readResponse<T>(response)
 }
 
+function requestId(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  // LAN HTTP pages lack randomUUID; getRandomValues also works outside secure contexts.
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
 export function action<T = unknown>(name: string, body: unknown = {}, write = false): Promise<T> {
   // 不自动重试写操作；若结果不确定，调用方重试时必须沿用原请求标识。
-  return api<T>(
-    `/api/actions/${name}`,
-    body,
-    write ? { 'Idempotency-Key': crypto.randomUUID() } : {},
-  )
+  return api<T>(`/api/actions/${name}`, body, write ? { 'Idempotency-Key': requestId() } : {})
 }
 
 export async function putUpload(ticket: UploadTicket, file: File): Promise<void> {
