@@ -235,3 +235,6 @@ release.env
 backups/
 postgres/
 files/
+caddy.env
+caddy-data/
+caddy-config/

@@ -1,0 +1,29 @@
+services:
+  migrate:
+    environment:
+      RAG_HTTPS_DOMAIN: ${RAG_DOMAIN:-rag.xqtdevelopment.xyz}
+      RAG_HTTPS_PORT: ${RAG_HTTPS_PORT:-443}
+  api:
+    # Only the reverse proxy is reachable from the LAN when HTTPS is enabled.
+    ports: !override
+      - "127.0.0.1:8000:8000"
+  caddy:
+    image: ${CADDY_IMAGE:?Set the published Caddy GHCR digest}
+    restart: unless-stopped
+    env_file: [caddy.env]
+    environment:
+      RAG_DOMAIN: ${RAG_DOMAIN:-rag.xqtdevelopment.xyz}
+    ports:
+      - "${RAG_BIND_IP:?Set RAG_BIND_IP}:${RAG_HTTPS_PORT:-443}:443"
+    volumes:
+      - ${CADDYFILE_PATH:-./Caddyfile}:/etc/caddy/Caddyfile:ro
+      - ./caddy-data:/data
+      - ./caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
