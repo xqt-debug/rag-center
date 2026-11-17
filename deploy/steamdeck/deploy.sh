@@ -45,6 +45,8 @@ fi
 if [[ "$https" = true ]]; then
   # Validate before stopping writers; no credentials or rendered config in logs.
   "${compose[@]}" pull caddy
+  # Expand these variables inside the container, where caddy.env is loaded.
+  # shellcheck disable=SC2016
   "${compose[@]}" run --rm --no-deps --entrypoint sh caddy -ec \
     'test -n "$ALIYUN_ACCESS_KEY_ID" && test -n "$ALIYUN_ACCESS_KEY_SECRET"'
   docker run --rm --env-file "$deploy_dir/caddy.env" \
