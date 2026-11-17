@@ -125,12 +125,12 @@ jobs:
         env:
           IMAGE: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}
         run: |
-          docker run --rm "$IMAGE" list-modules | grep -Fx dns.providers.alidns
+          docker run --rm "$IMAGE" caddy list-modules | grep -Fx dns.providers.alidns
           docker run --rm \
             -e ALIYUN_ACCESS_KEY_ID=ci-placeholder \
             -e ALIYUN_ACCESS_KEY_SECRET=ci-placeholder \
             -v "$PWD/deploy/steamdeck/Caddyfile:/etc/caddy/Caddyfile:ro" \
-            "$IMAGE" validate --config /etc/caddy/Caddyfile --adapter caddyfile
+            "$IMAGE" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - uses: docker/login-action@v3
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         with:

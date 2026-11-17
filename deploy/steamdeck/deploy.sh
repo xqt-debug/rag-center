@@ -51,10 +51,10 @@ if [[ "$https" = true ]]; then
     'test -n "$ALIYUN_ACCESS_KEY_ID" && test -n "$ALIYUN_ACCESS_KEY_SECRET"'
   docker run --rm --env-file "$deploy_dir/caddy.env" \
     -v "$source_dir/Caddyfile:/etc/caddy/Caddyfile:ro" \
-    "$CADDY_IMAGE" validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    "$CADDY_IMAGE" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
   # Exercise the actual configured host port (including RootlessKit permissions).
   if [[ -z "$("${compose[@]}" ps --status running -q caddy)" ]]; then
-    "${compose[@]}" run --rm --no-deps --service-ports caddy version
+    "${compose[@]}" run --rm --no-deps --service-ports caddy caddy version
   fi
   "${compose[@]}" run --rm --no-deps migrate python -c '
 import os
