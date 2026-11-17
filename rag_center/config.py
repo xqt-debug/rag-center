@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,12 +14,6 @@ class Settings(BaseSettings):
     storage_dir: Path = Path("data/files")
     public_url: str = "http://localhost:8000"
     secret: str = "development-only-change-before-deploying"
-    # 仅供开发环境使用；生产环境不会注册账号密码测试入口。
-    dev_username: str = Field("admin", pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
-    dev_password: SecretStr = Field(default=SecretStr("admin123"), min_length=1, max_length=256)
-    sms_provider: Literal["development", "webhook"] = "development"
-    sms_webhook_url: str = ""
-    sms_webhook_token: str = ""
     embedding_provider: Literal["local-test", "openai-compatible"] = "openai-compatible"
     embedding_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     embedding_api_key: str = ""
@@ -28,7 +22,6 @@ class Settings(BaseSettings):
     max_file_mb: int = Field(20, gt=0)
     storage_quota_mb: int = Field(200, gt=0)
     max_documents: int = Field(200, gt=0)
-    otp_ttl: int = Field(300, gt=0)
     session_ttl: int = Field(604800, gt=0)
     job_lease_seconds: int = Field(300, ge=3)
 
@@ -38,8 +31,6 @@ class Settings(BaseSettings):
                 raise ValueError("Production requires a random RAG_SECRET of at least 32 characters")
             if not self.database_url.startswith("postgresql"):
                 raise ValueError("Production requires PostgreSQL")
-            if self.sms_provider != "webhook" or not self.sms_webhook_url.startswith("https://"):
-                raise ValueError("Production requires an HTTPS SMS webhook")
             if self.embedding_provider != "openai-compatible" or not self.embedding_api_key:
                 raise ValueError("Production requires a real embedding service")
             if not self.public_url.startswith("https://"):

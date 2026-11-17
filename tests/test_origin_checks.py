@@ -18,11 +18,11 @@ def test_development_login_accepts_supported_loopback_origins(system, origin):
     # 仅在内存中调用 ASGI 应用，不启动监听端口或常驻服务。
     with TestClient(create_app(settings), base_url="http://127.0.0.1:8000") as client:
         response = client.post(
-            "/api/auth/dev-login",
+            "/api/auth/register",
             headers={"Origin": origin},
             json={"username": "admin", "password": "admin123"},
         )
-        assert response.status_code == 200
+        assert response.status_code == 201
         assert response.json()["username"] == "admin"
         csrf = response.json()["csrf"]
         protected = client.post(
@@ -44,7 +44,7 @@ def test_development_rejects_unknown_origins(system, origin):
     _, _, _, _, settings = system
     with TestClient(create_app(settings)) as client:
         response = client.post(
-            "/api/auth/dev-login",
+            "/api/auth/register",
             headers={"Origin": origin},
             json={"username": "admin", "password": "admin123"},
         )
@@ -58,11 +58,11 @@ def test_configured_public_url_accepts_trailing_slash(system):
     settings.public_url = "http://localhost:8000/"
     with TestClient(create_app(settings)) as client:
         response = client.post(
-            "/api/auth/dev-login",
+            "/api/auth/register",
             headers={"Origin": "http://localhost:8000"},
             json={"username": "admin", "password": "admin123"},
         )
-        assert response.status_code == 200
+        assert response.status_code == 201
 
 
 def test_production_does_not_trust_development_origins(system, monkeypatch):
@@ -73,8 +73,6 @@ def test_production_does_not_trust_development_origins(system, monkeypatch):
             "database_url": "postgresql+psycopg://unused@localhost/unused",
             "secret": "x" * 48,
             "public_url": "https://rag.example/",
-            "sms_provider": "webhook",
-            "sms_webhook_url": "https://sms.example/send",
             "embedding_provider": "openai-compatible",
             "embedding_api_key": "test-key",
         }
@@ -82,20 +80,24 @@ def test_production_does_not_trust_development_origins(system, monkeypatch):
     app = create_app(production)
     calls = []
 
-    def send_code(phone, ip):
-        calls.append(phone)
-        return {"sent": True}
+    def register(username, password, ip):
+        calls.append(username)
+        return "session-token", {"username": username, "csrf": "token"}
 
-    monkeypatch.setattr(app.state.auth, "send_code", send_code)
-    # 仅在内存中处理请求；生产环境不执行开发建表，也不实际连接数据库或发送短信。
+    monkeypatch.setattr(app.state.auth, "register", register)
+    # 仅在内存中处理请求；生产环境不执行开发建表，也不实际连接数据库。
     with TestClient(app) as client:
         for origin in ["http://localhost:8000", "http://127.0.0.1:8000", "http://localhost:5173"]:
             response = client.post(
-                "/api/auth/code", headers={"Origin": origin}, json={"phone": "13800000003"}
+                "/api/auth/register",
+                headers={"Origin": origin},
+                json={"username": "tester", "password": "test-password"},
             )
             assert response.status_code == 403
         response = client.post(
-            "/api/auth/code", headers={"Origin": "https://rag.example"}, json={"phone": "13800000003"}
+            "/api/auth/register",
+            headers={"Origin": "https://rag.example"},
+            json={"username": "tester", "password": "test-password"},
         )
-        assert response.status_code == 200
-    assert calls == ["13800000003"]
+        assert response.status_code == 201
+    assert calls == ["tester"]

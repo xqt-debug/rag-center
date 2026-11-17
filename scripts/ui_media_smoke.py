@@ -14,6 +14,8 @@ ORIGIN = "http://127.0.0.1:8000"
 
 def main():
     config = dotenv_values(ROOT / ".env")
+    if not config.get("RAG_SMOKE_USERNAME") or not config.get("RAG_SMOKE_PASSWORD"):
+        raise SystemExit("请先注册测试账号，并配置 RAG_SMOKE_USERNAME / RAG_SMOKE_PASSWORD")
     with httpx.Client(trust_env=False) as client:
         health = client.get(ORIGIN + "/api/health").json()
     if health["embedding_provider"] != "local-test" and not health["embedding_configured"]:
@@ -36,10 +38,10 @@ def main():
         base, csrf = None, None
         try:
             page.goto(ORIGIN)
-            page.get_by_placeholder("输入测试账号").fill(config.get("RAG_DEV_USERNAME") or "admin")
-            page.get_by_placeholder("输入测试密码").fill(config.get("RAG_DEV_PASSWORD") or "admin123")
-            with page.expect_response("**/api/auth/dev-login") as response:
-                page.get_by_role("button", name="登录，进入知识空间").click()
+            page.get_by_placeholder("输入账号").fill(config.get("RAG_SMOKE_USERNAME") or "")
+            page.get_by_placeholder("输入密码").fill(config.get("RAG_SMOKE_PASSWORD") or "")
+            with page.expect_response("**/api/auth/login") as response:
+                page.get_by_role("button", name="登录知识空间").click()
             csrf = response.value.json()["csrf"]
             page.get_by_role("button", name="新建知识库", exact=True).click()
             page.get_by_placeholder("例如：项目资料、学习笔记").fill("图片文本验收-" + uuid.uuid4().hex[:8])

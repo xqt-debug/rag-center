@@ -31,19 +31,12 @@ export function useWorkspace() {
     health = ref<Partial<Health>>({}),
     booting = ref(true),
     busy = ref(false)
-  const phone = ref(''),
-    code = ref(''),
-    devCode = ref(''),
-    cooldown = ref(0)
-  const username = ref('admin'),
-    password = ref('')
-  const passwordLogin = computed(() => health.value.login_mode === 'password')
-  const userLabel = computed(() => {
-    if (user.value?.username) return user.value.username
-    const number = user.value?.phone
-    return number ? `${number.slice(0, 3)} **** ${number.slice(-4)}` : '用户'
-  })
-  const userAvatar = computed(() => (user.value?.username || user.value?.phone || '').slice(-2))
+  const username = ref(''),
+    password = ref(''),
+    confirmPassword = ref(''),
+    registering = ref(false)
+  const userLabel = computed(() => user.value?.username || '用户')
+  const userAvatar = computed(() => (user.value?.username || '').slice(-2))
   const page = ref('library'),
     bases = ref<KnowledgeBase[]>([]),
     selected = ref(''),
@@ -189,29 +182,24 @@ export function useWorkspace() {
       if (value === 'library') await refresh()
     })
   }
-  async function sendCode() {
-    await attempt(async () => {
-      const result = await api<{ development_code?: string }>('/api/auth/code', {
-        phone: phone.value,
-      })
-      devCode.value = result.development_code || ''
-      cooldown.value = 60
-      if (devCode.value) code.value = devCode.value
-      notify(devCode.value ? '开发验证码已生成' : '验证码已发送')
-    })
+  function toggleRegistration() {
+    registering.value = !registering.value
+    password.value = ''
+    confirmPassword.value = ''
+    error.value = ''
   }
   async function login() {
     await attempt(async () => {
-      user.value = passwordLogin.value
-        ? await api<User>('/api/auth/dev-login', {
-            username: username.value,
-            password: password.value,
-          })
-        : await api<User>('/api/auth/login', { phone: phone.value, code: code.value })
+      if (registering.value && password.value !== confirmPassword.value)
+        throw new Error('两次输入的密码不一致')
+      user.value = await api<User>(registering.value ? '/api/auth/register' : '/api/auth/login', {
+        username: username.value,
+        password: password.value,
+      })
       setCsrf(user.value.csrf)
-      devCode.value = ''
-      code.value = ''
       password.value = ''
+      confirmPassword.value = ''
+      registering.value = false
       await refresh()
     })
   }
@@ -220,7 +208,7 @@ export function useWorkspace() {
       await api('/api/auth/logout', {})
       user.value = null
       setCsrf('')
-      // 退出后清空当前账户的数据，避免下次使用其他手机号登录时残留旧状态。
+      // 退出后清空当前账户的数据，避免下次使用其他账号登录时残留旧状态。
       closeModal()
       bases.value = []
       selected.value = ''
@@ -529,7 +517,6 @@ export function useWorkspace() {
       booting.value = false
     }
     timer = setInterval(async () => {
-      if (cooldown.value) cooldown.value--
       if (
         ++poll % indexPollingSeconds(docs.value, stats.value.queued) === 0 &&
         user.value &&
@@ -561,15 +548,13 @@ export function useWorkspace() {
     health,
     booting,
     busy,
-    phone,
     username,
     password,
-    passwordLogin,
+    confirmPassword,
+    registering,
+    toggleRegistration,
     userLabel,
     userAvatar,
-    code,
-    devCode,
-    cooldown,
     page,
     bases,
     selected,
@@ -613,7 +598,6 @@ export function useWorkspace() {
     loadDocs,
     selectBase,
     navigate,
-    sendCode,
     login,
     logout,
     openModal,

@@ -2,7 +2,7 @@
 
 个人知识库与 Agent 检索服务。Python / FastAPI + PostgreSQL / pgvector + Vue 3。
 
-已实现开发环境账号密码登录、正式环境手机号验证码登录、知识库和文件管理、异步解析与索引、关键词／向量／混合检索、原文预览、访问密钥及 MCP 完整增删改查。
+已实现账号密码登录与自主注册、知识库和文件管理、异步解析与索引、关键词／向量／混合检索、原文预览、访问密钥及 MCP 完整增删改查。
 
 产品需求见 [documents/PRD.md](documents/PRD.md)，当前实现边界见 [documents/IMPLEMENTATION.md](documents/IMPLEMENTATION.md)。
 
@@ -32,17 +32,9 @@ Set-Location ..
 
 开发前端时也可在 `frontend` 中运行 `npm.cmd run dev`，访问其显示的本地 5173 地址。API 继续运行在 8000，前端开发服务器代理 API 与 MCP 请求。
 
-开发环境直接使用账号密码登录，默认账号 **`admin`**、密码 **`admin123`**，无需短信。可在 `.env` 中修改：
+首次使用，在登录页点击“没有账号？创建账号”，填写账号和至少 8 位密码，注册后直接进入知识空间。账号支持 1–64 位字母、数字、下划线、点和短横线，以字母或数字开头，区分大小写。开发和生产环境统一使用账号密码登录，不再提供短信或固定开发账号登录入口，也不会自动创建默认账号。
 
-```dotenv
-RAG_ENV=development
-RAG_DEV_USERNAME=admin
-RAG_DEV_PASSWORD=admin123
-```
-
-测试账号首次成功登录时创建，之后登录保留原有知识库与文件。手机号可为空，不需要填写虚构号码。开发密码通过环境配置校验，不写入用户表或前端配置；修改配置后需重启服务。
-
-生产环境不注册测试账号密码入口，登录页继续使用手机号验证码流程。升级已有项目时先运行 `.venv\Scripts\python.exe -m alembic upgrade head`，应用新增用户名及手机号可空的迁移。
+升级已有项目时先运行 `.venv\Scripts\python.exe -m alembic upgrade head`。迁移 `0005` 为账号添加随机盐 scrypt 密码哈希，并使旧网页登录会话失效。已有开发账号沿用迁移时旧 `RAG_DEV_USERNAME` / `RAG_DEV_PASSWORD` 配置（未配置时为历史默认值），保留原用户 ID、知识库和文件；这两个配置迁移后不再参与登录，可以删除。仅有手机号的历史用户和资料保留，但不能再通过短信登录，需由管理员核实归属后设置用户名和密码哈希；注册新账号不会自动关联旧资料。
 
 `.env.example` 默认连接 compose 中的 PostgreSQL。未创建 `.env` 时使用 `data/development.sqlite` 便于快速体验；SQLite 仅作为开发回退，关键词排序与生产 PostgreSQL 不完全相同。
 
@@ -79,18 +71,6 @@ GIF 等多帧图片最多均匀抽取 12 帧（包括首尾帧），重复整帧
 无可识别文字时显示“已保存（未识别到文字）”，可预览和下载，不建立空向量、不计入索引完成；OCR 或向量服务失败会显示失败原因，原图仍可下载并重试。此功能暂不为扫描 PDF 添加 OCR。
 
 原图预览使用与下载相同的 5 分钟短期凭证，可点击“刷新图片预览”续取；每次访问仍检查密钥撤销、文件删除和版本变化。上传限制：单帧最多 2000 万像素、最多 300 帧、累计最多 1.2 亿像素，单文件大小仍受 `RAG_MAX_FILE_MB` 限制。
-
-### 配置短信
-
-第一版通过可替换 HTTPS webhook 接短信网关。请求为 `POST`，使用 `Authorization: Bearer <RAG_SMS_WEBHOOK_TOKEN>`，JSON 为 `phone`、`code`、`expires_in`；返回 2xx 表示发送成功。
-
-```dotenv
-RAG_SMS_PROVIDER=webhook
-RAG_SMS_WEBHOOK_URL=https://your-sms-gateway.example/send
-RAG_SMS_WEBHOOK_TOKEN=your-gateway-secret
-```
-
-短信网关负责对接实际供应商的签名、模板和凭证。生产环境禁止使用开发验证码。
 
 ## MCP 接入
 
@@ -174,7 +154,7 @@ npm.cmd run build
 
 ## 部署约束
 
-- 生产设置 `RAG_ENV=production`、随机且至少 32 字符的 `RAG_SECRET`、HTTPS 公网地址、PostgreSQL、真实短信和真实 Embedding 服务；启动时检查配置，缺失则拒绝运行。
+- 生产设置 `RAG_ENV=production`、随机且至少 32 字符的 `RAG_SECRET`、HTTPS 公网地址、PostgreSQL和真实 Embedding 服务；启动时检查配置，缺失则拒绝运行。
 - 先运行 `alembic upgrade head`，再分别运行 API 与 worker：
 
 ```powershell
@@ -183,7 +163,7 @@ npm.cmd run build
 ```
 
 - API 和 worker 必须共享相同配置、数据库及文件目录；当前使用本地文件存储，不支持多个无共享磁盘的主机。
-- 反向代理配置 HTTPS、上传大小和超时；勿将短信、手机号或代理用户输入直接当作可信代理头。当前按直连 IP 限流，代理部署需在可信入口统一限流。
+- 反向代理配置 HTTPS、上传大小和超时；勿将用户输入直接当作可信代理头。当前按直连 IP 限流，代理部署需在可信入口统一限流。
 - 使用无访问日志的启动参数，避免日志保留携带文件传输凭证的 URL；代理同样应隐藏这些路径。
 - 默认 compose 凭证仅供本地开发。部署前修改密码与连接串，不向公网暴露数据库。
 - 备份需同时覆盖 PostgreSQL、文件目录和签名密钥；改变签名密钥会使会话、API 密钥与传输链接失效。

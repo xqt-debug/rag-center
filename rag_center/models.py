@@ -20,17 +20,8 @@ class User(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
     phone: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
     username: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[float] = mapped_column(Float, default=time.time)
-
-
-class OTP(Base):
-    __tablename__ = "otps"
-    phone: Mapped[str] = mapped_column(String(20), primary_key=True)
-    digest: Mapped[str] = mapped_column(String(64))
-    expires_at: Mapped[float] = mapped_column(Float)
-    sent_at: Mapped[float] = mapped_column(Float)
-    attempts: Mapped[int] = mapped_column(Integer, default=0)
-    consumed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class LoginSession(Base):

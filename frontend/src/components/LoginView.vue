@@ -11,19 +11,8 @@ import {
 
 import { useWorkspaceContext } from '../context'
 const workspace = useWorkspaceContext()
-const {
-  busy,
-  phone,
-  code,
-  devCode,
-  cooldown,
-  error,
-  sendCode,
-  login,
-  username,
-  password,
-  passwordLogin,
-} = workspace
+const { busy, error, login, username, password, confirmPassword, registering, toggleRegistration } =
+  workspace
 </script>
 
 <template>
@@ -82,79 +71,62 @@ const {
         <ArrowUpRight :size="16" />
       </div>
       <form @submit.prevent="login" class="login-box">
-        <span class="mini-label">开始连接</span>
-        <h2>欢迎来到 RAG Center</h2>
+        <span class="mini-label">{{ registering ? '创建账号' : '开始使用' }}</span>
+        <h2>{{ registering ? '注册 RAG Center' : '欢迎回来' }}</h2>
         <p class="muted">
-          {{
-            passwordLogin
-              ? '使用测试账号和密码进入知识空间。'
-              : '使用手机号登录，首次登录将自动创建账户。'
-          }}
+          {{ registering ? '创建账号，开启你的知识空间。' : '使用账号和密码进入知识空间。' }}
         </p>
-        <template v-if="passwordLogin">
-          <label>
-            账号
-            <input
-              v-model="username"
-              placeholder="输入测试账号"
-              autocomplete="username"
-              maxlength="64"
-              required
-            />
-          </label>
-          <label>
-            密码
-            <input
-              v-model="password"
-              type="password"
-              placeholder="输入测试密码"
-              autocomplete="current-password"
-              maxlength="256"
-              required
-            />
-          </label>
-          <div class="notice">测试模式 · 账号密码登录</div>
-        </template>
-        <template v-else>
-          <label>
-            手机号码
-            <input
-              v-model="phone"
-              type="tel"
-              placeholder="输入中国大陆手机号"
-              maxlength="11"
-              autocomplete="tel"
-              required
-              pattern="1[3-9][0-9]{9}"
-            />
-          </label>
-          <label>
-            短信验证码
-            <div class="code-input">
-              <input
-                v-model="code"
-                placeholder="6 位验证码"
-                maxlength="6"
-                inputmode="numeric"
-                autocomplete="one-time-code"
-                required
-                pattern="[0-9]{6}"
-              />
-              <button
-                type="button"
-                :disabled="busy || cooldown > 0 || phone.length !== 11"
-                @click="sendCode"
-              >
-                {{ cooldown ? `${cooldown}s 后重试` : '获取验证码' }}
-              </button>
-            </div>
-          </label>
-          <div v-if="devCode" class="notice">开发模式 · 本次验证码 {{ devCode }}，已自动填入。</div>
-        </template>
+        <label>
+          账号
+          <input
+            v-model="username"
+            placeholder="输入账号"
+            autocomplete="username"
+            maxlength="64"
+            pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}"
+            required
+            :disabled="busy"
+          />
+        </label>
+        <p v-if="registering" class="muted">
+          1–64 位，以字母或数字开头，可包含下划线、点和短横线。
+        </p>
+        <label>
+          密码
+          <input
+            v-model="password"
+            type="password"
+            placeholder="输入密码"
+            :autocomplete="registering ? 'new-password' : 'current-password'"
+            :minlength="registering ? 8 : 1"
+            maxlength="256"
+            required
+            :disabled="busy"
+          />
+        </label>
+        <label v-if="registering">
+          确认密码
+          <input
+            v-model="confirmPassword"
+            type="password"
+            placeholder="再次输入密码"
+            autocomplete="new-password"
+            minlength="8"
+            maxlength="256"
+            required
+            :disabled="busy"
+          />
+        </label>
+        <p v-if="registering" class="muted">密码至少 8 位。</p>
         <div v-if="error" class="error" role="alert">{{ error }}</div>
         <button class="primary login-submit" :disabled="busy">
-          <span>{{ busy ? '正在连接…' : '登录，进入知识空间' }}</span>
+          <span>
+            {{ busy ? '正在连接…' : registering ? '注册并进入知识空间' : '登录知识空间' }}
+          </span>
           <ArrowRight :size="18" />
+        </button>
+        <button type="button" :disabled="busy" @click="toggleRegistration">
+          {{ registering ? '已有账号？去登录' : '没有账号？创建账号' }}
         </button>
         <p class="login-note">
           <ShieldCheck :size="14" />

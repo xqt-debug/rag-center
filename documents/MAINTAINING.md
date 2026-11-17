@@ -42,7 +42,7 @@ HTTP 和 MCP 仅承担传输适配，不复制业务逻辑。直接字节上传�
 | `rag_center/media.py` | 图片格式、像素、帧数和解码量校验 |
 | `rag_center/ocr.py` | 本地 OCR 模型缓存、帧抽样及文字去重 |
 | `rag_center/worker.py` | 领取、续租、处理、缓存复用、原子发布、失败记录和常驻循环 |
-| `rag_center/auth.py` | 开发账号密码登录、手机验证码、网页登录会话、API 密钥认证 |
+| `rag_center/auth.py` | 账号密码登录、自主注册、网页登录会话、API 密钥认证 |
 
 ### 新增一个业务操作
 

@@ -1,24 +1,43 @@
 import hashlib
 import hmac
-import re
 import secrets
 import time
 from dataclasses import dataclass
 
-import httpx
-from sqlalchemy import select, update
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import Settings
 from .db import Database
 from .errors import DomainError, require
-from .models import OTP, ApiKey, LoginSession, RateBucket, User
+from .models import ApiKey, LoginSession, RateBucket, User
 
 SCOPES = {"read", "create", "update", "delete", "download", "kb:create"}
 
 
 def digest(value: str, secret: str):
     return hmac.new(secret.encode(), value.encode(), hashlib.sha256).hexdigest()
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    value = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1)
+    return f"scrypt$16384$8$1${salt}${value.hex()}"
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, n, r, p, salt, expected = encoded.split("$")
+        if algorithm != "scrypt" or (n, r, p) != ("16384", "8", "1"):
+            return False
+        actual = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1)
+        return hmac.compare_digest(actual.hex(), expected)
+    except (ValueError, TypeError):
+        return False
+
+
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
 @dataclass(frozen=True)
@@ -55,7 +74,7 @@ def rate_limit(session: Session, key: str, limit: int, window: int) -> None:
 
 
 class Auth:
-    """处理开发账号登录、手机验证码及可分别撤销的会话和 API 凭证。"""
+    """处理账号注册、密码登录及可分别撤销的会话和 API 凭证。"""
 
     def __init__(self, database: Database, settings: Settings):
         self.db, self.settings = database, settings
@@ -65,7 +84,7 @@ class Auth:
         return {"id": user.id, "phone": user.phone, "username": user.username, "csrf": csrf}
 
     def _issue_session(self, session: Session, user: User) -> tuple[str, dict]:
-        """与账号创建或验证码消费一起提交，复用同一套会话及 CSRF 机制。"""
+        """与账号创建一起提交，复用同一套会话及 CSRF 机制。"""
         token, csrf = secrets.token_urlsafe(40), secrets.token_urlsafe(24)
         session.add(
             LoginSession(
@@ -78,89 +97,35 @@ class Auth:
         session.commit()
         return token, self.user_info(user, csrf)
 
-    def login_development(self, username: str, password: str, ip: str) -> tuple[str, dict]:
-        """只接受配置中的测试账号，不提供注册或正式环境密码登录。"""
-        require(self.settings.env == "development", "not_found", "登录方式不可用", 404)
+    def register(self, username: str, password: str, ip: str) -> tuple[str, dict]:
+        with self.db.sessions() as session:
+            rate_limit(session, f"register:{ip}", 10, 3600)
+            require(
+                not session.scalar(select(User.id).where(User.username == username)),
+                "username_taken",
+                "账号已存在，请使用其他账号",
+                409,
+            )
+            user = User(username=username, password_hash=hash_password(password))
+            session.add(user)
+            try:
+                session.flush()
+                return self._issue_session(session, user)
+            except IntegrityError:
+                session.rollback()
+                if session.scalar(select(User.id).where(User.username == username)):
+                    raise DomainError("username_taken", "账号已存在，请使用其他账号", 409) from None
+                raise
+
+    def login(self, username: str, password: str, ip: str) -> tuple[str, dict]:
         with self.db.sessions() as session:
             rate_limit(session, f"login:{ip}", 60, 600)
-            # 对固定长度摘要做比较，避免中文输入异常以及明文长度影响比较过程。
-            name_matches = hmac.compare_digest(
-                digest(username, self.settings.secret),
-                digest(self.settings.dev_username, self.settings.secret),
-            )
-            password_matches = hmac.compare_digest(
-                digest(password, self.settings.secret),
-                digest(self.settings.dev_password.get_secret_value(), self.settings.secret),
-            )
-            require(name_matches and password_matches, "invalid_credentials", "账号或密码错误", 401)
-            if session.bind.dialect.name == "postgresql":
-                from sqlalchemy.dialects.postgresql import insert
-            else:
-                from sqlalchemy.dialects.sqlite import insert
-            # 并发首次登录只创建一次账号，后续登录继续访问同一份知识库数据。
-            session.execute(
-                insert(User).values(username=username).on_conflict_do_nothing(index_elements=[User.username])
-            )
+            rate_limit(session, f"login-account:{digest(username, self.settings.secret)}", 20, 600)
             user = session.scalar(select(User).where(User.username == username))
+            encoded = user.password_hash if user and user.password_hash else _DUMMY_PASSWORD_HASH
+            valid = verify_password(password, encoded)
+            require(user and user.password_hash and valid, "invalid_credentials", "账号或密码错误", 401)
             return self._issue_session(session, user)
-
-    def send_code(self, phone, ip):
-        require(bool(re.fullmatch(r"1[3-9]\d{9}", phone)), "invalid_phone", "第一版支持中国大陆手机号")
-        with self.db.sessions() as s:
-            rate_limit(s, f"sms-ip:{ip}", 20, 3600)
-            rate_limit(s, f"sms-phone:{phone}", 10, 86400)
-            rate_limit(s, f"sms-cooldown:{phone}", 1, 60)
-            code = f"{secrets.randbelow(1000000):06d}"
-            now = time.time()
-            otp = s.get(OTP, phone)
-            require(not otp or now - otp.sent_at >= 60, "rate_limited", "请在 60 秒后重新获取验证码", 429)
-            if not otp:
-                otp = OTP(phone=phone)
-                s.add(otp)
-            otp.digest = digest(f"{phone}:{code}", self.settings.secret)
-            otp.sent_at, otp.expires_at = now, now + self.settings.otp_ttl
-            otp.consumed, otp.attempts = False, 0
-            if self.settings.sms_provider == "webhook":
-                try:
-                    with httpx.Client(timeout=10) as client:
-                        response = client.post(
-                            self.settings.sms_webhook_url,
-                            json={"phone": phone, "code": code, "expires_in": self.settings.otp_ttl},
-                            headers={"Authorization": f"Bearer {self.settings.sms_webhook_token}"},
-                        )
-                        response.raise_for_status()
-                except httpx.HTTPError:
-                    raise DomainError("sms_unavailable", "短信发送失败，请稍后再试", 503) from None
-            else:
-                require(self.settings.env != "production", "configuration_error", "短信服务未配置", 503)
-            s.commit()
-            result = {"sent": True, "expires_in": self.settings.otp_ttl}
-            if self.settings.sms_provider == "development":
-                result["development_code"] = code
-            return result
-
-    def login(self, phone, code, ip):
-        with self.db.sessions() as s:
-            rate_limit(s, f"login:{ip}", 60, 600)
-            otp = s.scalar(select(OTP).where(OTP.phone == phone).with_for_update())
-            valid = otp and not otp.consumed and otp.expires_at > time.time() and otp.attempts < 5
-            require(valid, "invalid_code", "验证码无效或已过期", 401)
-            otp.attempts += 1
-            if not hmac.compare_digest(otp.digest, digest(f"{phone}:{code}", self.settings.secret)):
-                s.commit()
-                raise DomainError("invalid_code", "验证码错误", 401)
-            # 通过条件更新消费验证码，也保护 SQLite 开发模式下的并发请求。
-            s.flush()
-            consumed = s.execute(
-                update(OTP).where(OTP.phone == phone, OTP.consumed.is_(False)).values(consumed=True)
-            )
-            require(consumed.rowcount == 1, "invalid_code", "验证码已被使用", 401)
-            user = s.scalar(select(User).where(User.phone == phone))
-            if not user:
-                user = User(phone=phone)
-                s.add(user)
-                s.flush()
-            return self._issue_session(s, user)
 
     def authenticate(self, session_token=None, bearer=None):
         with self.db.sessions() as s:

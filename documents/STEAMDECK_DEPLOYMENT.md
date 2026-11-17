@@ -21,7 +21,7 @@ Deck 不 checkout、不下载业务源码、不构建。它只通过 download-ar
 
 .env.example 与 app.env.example 只供新环境参考，流水线不会把它们下载到 Deck，也不会覆盖真实 env。
 当前验收为 development，PUBLIC_URL=http://192.168.31.72:8000，RAG_BIND_IP=192.168.31.72。
-Embedding Key 留空时实际索引明确失败；不回退 local-test。production 的 HTTPS、短信 webhook 和真实 Embedding 校验保持原样。
+Embedding Key 留空时实际索引明确失败；不回退 local-test。production 的 HTTPS 和真实 Embedding 校验保持原样。
 
 ## 部署顺序与失败语义
 
@@ -66,3 +66,5 @@ docker compose --env-file .env --env-file release.env ps
 ```
 
 失败时从对应 Actions 运行获得目标摘要，以 RAG_IMAGE 环境变量调用 Compose 检查状态。日志可能含业务信息，不应公开上传。只有 backups 下 COMPLETE 存在、校验和通过的目录才是完整配套备份。
+
+账号密码登录与注册在所有环境统一开放。升级 0005 时读取现有 app.env 中的旧开发账号配置迁移已有账号密码，保留资料；升级后不再需要 RAG_DEV_* 或 RAG_SMS_* 配置。首次安装请从页面注册。

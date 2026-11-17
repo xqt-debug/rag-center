@@ -288,25 +288,6 @@ def test_quota_and_filename_validation(system):
     assert exc.value.code == "quota_exceeded"
 
 
-def test_otp_single_use_wrong_attempts_and_session_revocation(system):
-    service, _, _, _, settings = system
-    auth = Auth(service.db, settings)
-    code = auth.send_code("13900000001", "127.0.0.1")["development_code"]
-    token, user = auth.login("13900000001", code, "127.0.0.1")
-    assert auth.authenticate(session_token=token).user_id == user["id"]
-    with pytest.raises(DomainError):
-        auth.login("13900000001", code, "127.0.0.1")
-    auth.logout(token)
-    with pytest.raises(DomainError):
-        auth.authenticate(session_token=token)
-    code = auth.send_code("13900000002", "127.0.0.1")["development_code"]
-    for _ in range(5):
-        with pytest.raises(DomainError):
-            auth.login("13900000002", "999999" if code != "999999" else "000000", "127.0.0.1")
-    with pytest.raises(DomainError):
-        auth.login("13900000002", code, "127.0.0.1")
-
-
 def test_embedding_failure_hybrid_falls_back_to_keyword(system, monkeypatch):
     service, worker, p, _, _ = system
     document(service, worker, p, kb(service, p))

@@ -14,6 +14,10 @@ ARTIFACTS = ROOT / "data" / "screenshots"
 
 def main():
     config = dotenv_values(ROOT / ".env")
+    if not (os.environ.get("RAG_SMOKE_USERNAME") or config.get("RAG_SMOKE_USERNAME")) or not (
+        os.environ.get("RAG_SMOKE_PASSWORD") or config.get("RAG_SMOKE_PASSWORD")
+    ):
+        raise SystemExit("请先注册测试账号，并配置 RAG_SMOKE_USERNAME / RAG_SMOKE_PASSWORD")
     health = httpx.get("http://localhost:8000/api/health", timeout=10).json()
     testing = health["embedding_provider"] == "local-test"
     if not testing and not health["embedding_configured"]:
@@ -32,19 +36,19 @@ def main():
         page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
         page.on("pageerror", lambda exc: errors.append(str(exc)))
         page.goto("http://localhost:8000", wait_until="networkidle")
-        expect(page.get_by_role("heading", name="欢迎来到 RAG Center")).to_be_visible()
+        expect(page.get_by_role("heading", name="欢迎回来")).to_be_visible()
         page.screenshot(path=str(ARTIFACTS / "login-desktop.png"), full_page=True)
         page.set_viewport_size({"width": 390, "height": 844})
         page.screenshot(path=str(ARTIFACTS / "login-mobile.png"), full_page=True)
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         page.set_viewport_size({"width": 1440, "height": 1000})
-        page.get_by_placeholder("输入测试账号").fill(
-            os.environ.get("RAG_DEV_USERNAME") or config.get("RAG_DEV_USERNAME") or "admin"
+        page.get_by_placeholder("输入账号").fill(
+            os.environ.get("RAG_SMOKE_USERNAME") or config.get("RAG_SMOKE_USERNAME") or ""
         )
-        page.get_by_placeholder("输入测试密码").fill(
-            os.environ.get("RAG_DEV_PASSWORD") or config.get("RAG_DEV_PASSWORD") or "admin123"
+        page.get_by_placeholder("输入密码").fill(
+            os.environ.get("RAG_SMOKE_PASSWORD") or config.get("RAG_SMOKE_PASSWORD") or ""
         )
-        page.get_by_role("button", name="登录，进入知识空间").click()
+        page.get_by_role("button", name="登录知识空间").click()
         expect(page.get_by_role("heading", name="我的知识库")).to_be_visible()
         page.get_by_role("button", name="新建知识库", exact=True).click()
         page.get_by_placeholder("例如：项目资料、学习笔记").fill("自动化验收空间")

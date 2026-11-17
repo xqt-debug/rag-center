@@ -6,7 +6,7 @@ import anyio
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.datastructures import Headers
 
@@ -47,17 +47,14 @@ class MCPAuthMiddleware:
         await self.app(scope, receive, send)
 
 
-class PhoneInput(BaseModel):
-    phone: str = Field(min_length=11, max_length=11, pattern=r"^1[3-9]\d{9}$")
-
-
-class LoginInput(PhoneInput):
-    code: str = Field(pattern=r"^\d{6}$")
-
-
-class DevelopmentLoginInput(BaseModel):
-    username: str = Field(min_length=1, max_length=64)
+class LoginInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    username: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
     password: str = Field(min_length=1, max_length=256)
+
+
+class RegisterInput(LoginInput):
+    password: str = Field(min_length=8, max_length=256)
 
 
 def create_app(settings=None):
@@ -142,12 +139,8 @@ def create_app(settings=None):
             and bool(settings.embedding_api_key.strip()),
             "database": db.engine.dialect.name,
             "max_file_mb": settings.max_file_mb,
-            "login_mode": "password" if settings.env == "development" else "phone",
+            "login_mode": "password",
         }
-
-    @app.post("/api/auth/code")
-    def send_code(body: PhoneInput, request: Request):
-        return auth.send_code(body.phone, request.client.host if request.client else "unknown")
 
     def login_response(token: str, user: dict):
         response = JSONResponse(user)
@@ -165,18 +158,16 @@ def create_app(settings=None):
     @app.post("/api/auth/login")
     def login(body: LoginInput, request: Request):
         return login_response(
-            *auth.login(body.phone, body.code, request.client.host if request.client else "unknown")
+            *auth.login(body.username, body.password, request.client.host if request.client else "unknown")
         )
 
-    if settings.env == "development":
-
-        @app.post("/api/auth/dev-login")
-        def development_login(body: DevelopmentLoginInput, request: Request):
-            return login_response(
-                *auth.login_development(
-                    body.username, body.password, request.client.host if request.client else "unknown"
-                )
-            )
+    @app.post("/api/auth/register", status_code=201)
+    def register(body: RegisterInput, request: Request):
+        response = login_response(
+            *auth.register(body.username, body.password, request.client.host if request.client else "unknown")
+        )
+        response.status_code = 201
+        return response
 
     @app.get("/api/auth/me")
     def me(request: Request):

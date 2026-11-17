@@ -20,10 +20,8 @@ def test_browser_login_csrf_file_transfer_and_logout(system):
     app = create_app(settings)
     with TestClient(app) as client:
         assert client.post("/api/actions/list_knowledge_bases", json={}).status_code == 401
-        sent = client.post("/api/auth/code", json={"phone": "13900000008"})
-        assert sent.status_code == 200
         result = client.post(
-            "/api/auth/login", json={"phone": "13900000008", "code": sent.json()["development_code"]}
+            "/api/auth/register", json={"username": "browser", "password": "browser-password"}
         )
         csrf = result.json()["csrf"]
         assert "HttpOnly" in result.headers["set-cookie"]

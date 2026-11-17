@@ -28,7 +28,7 @@ export interface Health {
   embedding_configured: boolean
   database: string
   max_file_mb: number
-  login_mode: 'password' | 'phone'
+  login_mode: 'password'
 }
 export interface KnowledgeBase {
   id: string

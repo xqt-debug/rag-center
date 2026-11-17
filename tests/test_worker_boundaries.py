@@ -107,9 +107,7 @@ def test_pdf_page_count_includes_trailing_blank_pages(system):
     assert document["page_count"] == 2 and document["chunk_count"] == 1
 
 
-@pytest.mark.parametrize(
-    "override", [{"sms_provider": "typo"}, {"job_lease_seconds": 0}, {"max_file_mb": -1}]
-)
+@pytest.mark.parametrize("override", [{"env": "typo"}, {"job_lease_seconds": 0}, {"max_file_mb": -1}])
 def test_invalid_settings_fail_at_startup(override):
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **override)
