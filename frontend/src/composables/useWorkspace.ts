@@ -171,12 +171,16 @@ export function useWorkspace() {
     docOffset.value = 0
     await attempt(loadDocs)
   }
+  async function loadKeys() {
+    const { items } = await action<ItemList<ApiKeyRecord>>('list_api_keys')
+    // 后端保留撤销记录供审计，前端密钥列表仅展示未撤销的记录。
+    keys.value = items.filter((key) => !key.revoked)
+  }
   async function navigate(value: string) {
     page.value = value
     error.value = ''
     await attempt(async () => {
-      if (value === 'keys')
-        keys.value = (await action<ItemList<ApiKeyRecord>>('list_api_keys')).items
+      if (value === 'keys') await loadKeys()
       if (value === 'activity')
         audit.value = (await action<ItemList<AuditEvent>>('list_audit_events')).items
       if (value === 'library') await refresh()
@@ -478,14 +482,14 @@ export function useWorkspace() {
       })
       rawKey.value = result.key
       modal.value = 'config'
-      keys.value = (await action<ItemList<ApiKeyRecord>>('list_api_keys')).items
+      await loadKeys()
     })
   }
   async function revoke(key: Pick<ApiKeyRecord, 'id'>) {
     await attempt(async () => {
       await action('revoke_api_key', { key_id: key.id }, true)
+      keys.value = keys.value.filter((item) => item.id !== key.id)
       closeModal()
-      keys.value = (await action<ItemList<ApiKeyRecord>>('list_api_keys')).items
       notify('密钥已撤销')
     })
   }
