@@ -237,5 +237,6 @@ postgres/
 files/
 caddy.env
 cloudflared.env
+app-secrets.env
 caddy-data/
 caddy-config/

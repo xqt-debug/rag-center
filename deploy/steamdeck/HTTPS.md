@@ -7,7 +7,7 @@ API 主机端口固定绑定 127.0.0.1:8000；数据库与连接器均无主机�
 
 ## 环境变量
 
-保留 `/home/deck/rag-center-deploy/.env` 中的 POSTGRES_PASSWORD。
+部署密钥统一在 GitHub 的 steamdeck Environment secrets 中管理。Compose 要求 >= 2.30.0（使用 raw env_file）。
 Compose 默认固定官方 cloudflared 2026.11.1 的镜像摘要；如需更新，可在 .env 设置
 `CLOUDFLARED_IMAGE=cloudflare/cloudflared@sha256:实际摘要`，禁止使用 latest。
 原 RAG_BIND_IP、RAG_DOMAIN、RAG_HTTPS_PORT、CADDY_IMAGE 不再参与新配置。
@@ -22,7 +22,27 @@ Compose 默认固定官方 cloudflared 2026.11.1 的镜像摘要；如需更新�
 缺少或格式不正确的 Secret 时，预检退出，不覆盖现有令牌文件，也不停止现有服务。
 更新或轮换令牌时，修改同名 Secret 并重新运行最新 main 的工作流。
 
-已有 `app.env` 保留签名密钥、数据库和 Embedding 设置，确认：
+同一 Environment 还支持以下 Secret（名称必须完全一致）：
+
+| 名称 | 值 | 迁移行为 |
+| --- | --- | --- |
+| CLOUDFLARED_TUNNEL_TOKEN | Tunnel 安装页面的令牌 | 必填，每次部署自动写入 cloudflared.env |
+| POSTGRES_PASSWORD | Deck 当前数据库密码 | 未填沿用 .env；填写时必须与现有数据库容器一致 |
+| RAG_SECRET | Deck 当前生产签名密钥 | 未填沿用原配置；填写时必须与现有 API 容器一致 |
+| RAG_EMBEDDING_API_KEY | 当前或新的 Embedding 服务 API Key | 未填沿用原配置；填写后自动更新 |
+
+不要重新生成 POSTGRES_PASSWORD 或 RAG_SECRET 来代替不知道的旧值，迁移与轮换是不同操作。
+数据库密码不能只修改容器配置；签名密钥变更会让既有 API 密钥和会话失效。
+脚本会在停止服务前检查这两项是否一致，不一致则拒绝部署，不输出秘密值。
+如果暂时不知道原值，先不添加对应 Secret，部署继续使用 Deck 上已有值，无需 SSH。
+
+部署脚本生成权限 600 的 app-secrets.env 覆盖应用秘密；使用 raw 格式保留 $、引号、# 等字符。
+已生成的覆盖值在 GitHub Secret 留空后仍保留；删除 Secret 不等于清除应用凭据。
+所有 Secret 仅填原始单行值，不加引号，不填写 KEY= 前缀。
+更新 Embedding API Key 时保持现有模型、维度及服务地址相匹配。
+GITHUB_TOKEN 由 Actions 自动提供，不需要添加 PAT；原阿里云 Caddy 密钥已不再使用。
+
+已有 `app.env` 的普通应用参数继续沿用，确认：
 
 ```dotenv
 RAG_ENV=production
@@ -45,7 +65,7 @@ production 要求真实 Embedding、PostgreSQL 和随机签名密钥。账号注
 通过检查后推送 main，由流水线发布应用镜像并将同次运行的部署附件交给 Deck runner。
 不要用 SSH 直接覆盖 Deck 的 Compose 或手动更新运行容器。
 Tunnel Token 在 GitHub 的 steamdeck Environment secrets 中管理，runner 自动写入 Deck。
-已有应用和数据库配置沿用，不需要为了隧道迁移重新填写这些密钥。
+其余三个 Secret 可分步迁移；未提供时保留已有配置，无需 SSH 手工填写。
 
 令牌配置完成后，推送 main，或手动运行最新 main 的 `CI and Steam Deck deployment`。
 确认 `STEAMDECK_DEPLOY_ENABLED=true`，并等待 deploy 作业成功。

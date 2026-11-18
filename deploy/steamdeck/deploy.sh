@@ -37,6 +37,8 @@ compose=(docker compose --project-name rag-center --project-directory "$deploy_d
   [[ ! -L "$deploy_dir/cloudflared.env" ]] || {
   echo 'cloudflared.env must be a regular file, not a symlink.' >&2; exit 1;
 }
+python3 "$source_dir/prepare-secrets.py" "$deploy_dir"
+unset DEPLOY_POSTGRES_PASSWORD DEPLOY_RAG_SECRET DEPLOY_EMBEDDING_API_KEY
 # 在部署锁内原子更新，仅供连接器容器启动使用；不让其他子进程继承令牌。
 token_tmp=$(mktemp "$deploy_dir/.cloudflared.env.XXXXXX")
 if ! { printf 'TUNNEL_TOKEN=%s\n' "$TUNNEL_TOKEN" > "$token_tmp" &&
@@ -107,7 +109,7 @@ tar -C "$deploy_dir" -czf "$backup/files.tar.gz" files
 tar -tzf "$backup/files.tar.gz" >/dev/null
 cp -- "$deploy_dir/.env" "$deploy_dir/app.env" "$deploy_dir/compose.yaml" "$backup/"
 # 迁移时同时保留旧代理配置用于人工回退，不删除证书或数据库。
-for config in release.env deploy.sh docker-env.sh cloudflared.env Caddyfile compose.https.yaml caddy.env; do
+for config in release.env deploy.sh docker-env.sh prepare-secrets.py app-secrets.env cloudflared.env Caddyfile compose.https.yaml caddy.env; do
   if [[ -f "$deploy_dir/$config" ]]; then cp -- "$deploy_dir/$config" "$backup/"; fi
 done
 (cd -- "$backup" && sha256sum database.dump files.tar.gz .env app.env compose.yaml > SHA256SUMS && sha256sum --check --status SHA256SUMS)
@@ -163,7 +165,7 @@ if [[ -n "$legacy_proxy" ]]; then
 fi
 if [[ "$source_dir" != "$deploy_dir" ]]; then
   cp -- "$source_dir/compose.yaml" "$deploy_dir/compose.yaml"
-  cp -- "$source_dir/deploy.sh" "$source_dir/docker-env.sh" "$deploy_dir/"
+  cp -- "$source_dir/deploy.sh" "$source_dir/docker-env.sh" "$source_dir/prepare-secrets.py" "$deploy_dir/"
 fi
 printf 'RAG_IMAGE=%s\n' "$image" > "$deploy_dir/release.env.tmp"
 printf 'CLOUDFLARED_IMAGE=%s\n' "$tunnel_image" >> "$deploy_dir/release.env.tmp"

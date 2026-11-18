@@ -3,7 +3,10 @@ name: rag-center
 x-app: &app
   image: ${RAG_IMAGE:?Set the published GHCR digest}
   user: "0:0"
-  env_file: [app.env]
+  env_file:
+    - app.env
+    - path: app-secrets.env
+      format: raw
   environment:
     RAG_DATABASE_URL: postgresql+psycopg://rag:${POSTGRES_PASSWORD:?Set a URL-safe password}@db:5432/rag
     RAG_STORAGE_DIR: /data/files

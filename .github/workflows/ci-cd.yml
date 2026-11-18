@@ -89,6 +89,7 @@ jobs:
       - name: Validate deployment Compose without starting services
         run: |
           cp deploy/steamdeck/app.env.example deploy/steamdeck/app.env
+          cp deploy/steamdeck/app-secrets.env.example deploy/steamdeck/app-secrets.env
           cp deploy/steamdeck/cloudflared.env.example deploy/steamdeck/cloudflared.env
           docker compose --env-file deploy/steamdeck/.env.example -f deploy/steamdeck/compose.yaml config --quiet
 
@@ -171,6 +172,8 @@ jobs:
             deploy/steamdeck/compose.yaml
             deploy/steamdeck/deploy.sh
             deploy/steamdeck/docker-env.sh
+            deploy/steamdeck/prepare-secrets.py
+            deploy/steamdeck/app-secrets.env.example
             deploy/steamdeck/cloudflared.env.example
             deploy/steamdeck/HTTPS.md
           if-no-files-found: error
@@ -258,6 +261,9 @@ jobs:
         shell: bash
         env:
           TUNNEL_TOKEN: ${{ secrets.CLOUDFLARED_TUNNEL_TOKEN }}
+          DEPLOY_POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          DEPLOY_RAG_SECRET: ${{ secrets.RAG_SECRET }}
+          DEPLOY_EMBEDDING_API_KEY: ${{ secrets.RAG_EMBEDDING_API_KEY }}
         run: bash "$DEPLOY_BUNDLE/deploy.sh" "$RAG_IMAGE"
       - name: Remove temporary credentials and deployment attachment
         if: always()

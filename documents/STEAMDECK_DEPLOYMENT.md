@@ -2,13 +2,13 @@
 
 ## 流程与边界
 
-部署变更在本机仓库修改、提交并推送，由 GitHub Actions 的 Deck runner 应用同次运行的 Compose 附件；不直接 SSH 修改 Deck 上的部署配置或运行容器。Tunnel Token 在 GitHub 的 steamdeck Environment secrets 中设置 CLOUDFLARED_TUNNEL_TOKEN，由 runner 自动生成权限 600 的 cloudflared.env；原有应用和数据库秘密文件沿用。
+部署变更在本机仓库修改、提交并推送，由 GitHub Actions 的 Deck runner 应用同次运行的 Compose 附件；不直接 SSH 修改 Deck 上的部署配置或运行容器。Tunnel Token 在 GitHub 的 steamdeck Environment secrets 中设置 CLOUDFLARED_TUNNEL_TOKEN，由 runner 自动生成权限 600 的 cloudflared.env；POSTGRES_PASSWORD、RAG_SECRET、RAG_EMBEDDING_API_KEY 也支持同一 Environment 的 Secret；未设置时沿用原配置，密码和签名密钥不允许在部署时意外轮换。
 
 PR 与 main 在 GitHub 托管 runner 执行 Ruff、SQLite/PostgreSQL 测试、前端测试和构建。
 部署配置任务执行 actionlint（含上下文/表达式检查）、bash -n、ShellCheck、Compose config，以及真实 deploy.sh 的 Docker 故障注入测试。
 镜像在 GitHub 构建 linux/amd64，在镜像内验证迁移、OCR 和前端 HTTP；全部通过后才推送同一个已测试镜像到 GHCR，输出注册表 sha256 摘要。
 
-Deck 不 checkout、不下载业务源码、不构建。它只通过 download-artifact 获取同次 workflow 的 compose.yaml、deploy.sh、docker-env.sh。凭据写入 RUNNER_TEMP 下的独立 DOCKER_CONFIG，链接用户已有 Compose 插件；登录动作退出及 always 清理步骤负责移除凭据和临时附件。
+Deck 不 checkout、不下载业务源码、不构建。它只通过 download-artifact 获取同次 workflow 的 compose.yaml、deploy.sh、docker-env.sh、prepare-secrets.py 等部署附件。凭据写入 RUNNER_TEMP 下的独立 DOCKER_CONFIG，链接用户已有 Compose 插件；登录动作退出及 always 清理步骤负责移除凭据和临时附件。
 
 ## 现有实例
 
@@ -16,12 +16,14 @@ Deck 不 checkout、不下载业务源码、不构建。它只通过 download-ar
 部署预检要求数据库已健康，且数据挂载源恰为该目录的 postgres；不会创建或重建数据库。
 
 - .env：POSTGRES_PASSWORD、可选 CLOUDFLARED_IMAGE；保留 Deck 已有随机值，权限 600。
-- app.env：RAG_* 应用参数、签名密钥、随机登录凭据和 Embedding 设置；保留原值，权限 600。
+- app.env：原有 RAG_* 配置，保留原值，权限 600。
+- app-secrets.env：runner 自动生成的 RAG_SECRET、RAG_EMBEDDING_API_KEY 覆盖，raw 格式，权限 600；Compose >= 2.30.0。
+- Environment secrets：CLOUDFLARED_TUNNEL_TOKEN 必填，其余 POSTGRES_PASSWORD、RAG_SECRET、RAG_EMBEDDING_API_KEY 可分步迁移；密码与签名密钥必须填写原值。
 - postgres/：绑定 /var/lib/postgresql/data；数据库无主机端口。
 - files/：绑定 /data/files；容器 user 0:0 通过 rootless 映射至主机 deck。
 - backups/：每次部署一个私有目录，包含数据库归档、文件、应用、数据库与隧道 env、原 Compose 和可用的原部署脚本、成功摘要。
 
-.env.example 与 app.env.example 只供新环境参考，流水线不会把它们下载到 Deck，也不会覆盖真实 env。
+.env.example 与 app.env.example 只供新环境参考，它们不覆盖现有业务配置；runner 只按已提供的 Secret 更新对应凭据或覆盖文件。
 公网配置要求 production，PUBLIC_URL=https://rag.xqtdevelopment.xyz；API 主机端口仅绑定 127.0.0.1。
 cloudflared 与 API 属于同一 Compose 项目；cloudflared.env 由部署脚本根据 steamdeck Environment Secret CLOUDFLARED_TUNNEL_TOKEN 自动生成，权限 600，无需 SSH 填写。
 完整配置见 deploy/steamdeck/HTTPS.md。隧道未完成公网验收时，不应视为已上线。

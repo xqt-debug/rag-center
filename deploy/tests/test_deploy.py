@@ -10,6 +10,7 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[1] / "steamdeck" / "deploy.sh"
 IMAGE = "ghcr.io/xqt-debug/rag-center@sha256:" + "a" * 64
 TUNNEL_IMAGE = "cloudflare/cloudflared@sha256:" + "b" * 64
+SIGNING_SECRET = "existing-production-signing-secret-123456789"
 FAKE = r"""#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -27,6 +28,13 @@ if '--images' in a:
 elif a[0] == 'ps':
     if os.environ.get('LEGACY_CADDY'): print('legacy-caddy-id')
 elif a[0] == 'inspect':
+    if len(a) == 2:
+        service = 'db' if a[1] == 'rag-center-db-1' else 'api'
+        print(json.dumps([{'Name': '/rag-center-' + service + '-1', 'Config': {
+            'Labels': {'com.docker.compose.project': 'rag-center', 'com.docker.compose.service': service},
+            'Env': ['POSTGRES_PASSWORD=existing-db-password',
+                    'RAG_SECRET=existing-production-signing-secret-123456789']}}]))
+        sys.exit(0)
     fmt = a[2]
     if 'Health.Status' in fmt: print('healthy')
     elif '.Name' in fmt: print('/rag-center-db-1')
@@ -52,6 +60,8 @@ class DeploymentFailures(unittest.TestCase):
         token="a" * 80,
         legacy=False,
         existing_token=None,
+        secret_env=None,
+        existing_app_secrets=None,
     ):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -63,6 +73,8 @@ class DeploymentFailures(unittest.TestCase):
         (root / "files" / "note").write_text("original file")
         if existing_token is not None:
             (root / "cloudflared.env").write_text("TUNNEL_TOKEN=" + existing_token + "\n")
+        if existing_app_secrets is not None:
+            (root / "app-secrets.env").write_text(existing_app_secrets)
         if legacy:
             (root / "caddy.env").write_text("legacy credentials\n")
         docker = root / "bin" / "docker"
@@ -79,7 +91,11 @@ class DeploymentFailures(unittest.TestCase):
             TEST_TUNNEL_IMAGE=tunnel_image,
             LEGACY_CADDY="1" if legacy else "",
             TUNNEL_TOKEN=token or "",
+            DEPLOY_POSTGRES_PASSWORD="",
+            DEPLOY_RAG_SECRET="",
+            DEPLOY_EMBEDDING_API_KEY="",
         )
+        env.update(secret_env or {})
         command = ["bash", str(SCRIPT), image]
         result = subprocess.run(command, env=env, capture_output=True, text=True)
         calls = (
@@ -196,3 +212,41 @@ class DeploymentFailures(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual((root / "cloudflared.env").read_text(), "TUNNEL_TOKEN=old-token\n")
                 self.assertFalse(any("stop" in c for c in calls))
+
+    def test_other_environment_secrets_preserve_values_permissions_and_do_not_leak(self):
+        api_key = "key-$dollar${variable}-'quoted'-\"double\"-#hash-\\slash"
+        supplied = {
+            "DEPLOY_POSTGRES_PASSWORD": "existing-db-password",
+            "DEPLOY_RAG_SECRET": SIGNING_SECRET,
+            "DEPLOY_EMBEDDING_API_KEY": api_key,
+        }
+        result, calls, root = self.run_deploy(secret_env=supplied)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        raw = (root / "app-secrets.env").read_text()
+        self.assertIn("RAG_EMBEDDING_API_KEY=" + api_key + "\n", raw)
+        self.assertIn("RAG_SECRET=" + SIGNING_SECRET + "\n", raw)
+        self.assertIn("POSTGRES_PASSWORD=existing-db-password\n", (root / ".env").read_text())
+        self.assertEqual((root / "app-secrets.env").stat().st_mode & 0o777, 0o600)
+        output = result.stdout + result.stderr + json.dumps(calls)
+        for value in supplied.values():
+            self.assertNotIn(value, output)
+
+    def test_missing_optional_secrets_preserves_existing_overrides(self):
+        original = "RAG_EMBEDDING_API_KEY=previous-key\nRAG_SECRET=" + SIGNING_SECRET + "\n"
+        result, _, root = self.run_deploy(existing_app_secrets=original)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(original, (root / "app-secrets.env").read_text())
+
+    def test_mismatched_or_multiline_secret_fails_before_config_changes_or_stopping(self):
+        for secret_env in (
+            {"DEPLOY_POSTGRES_PASSWORD": "different-password"},
+            {"DEPLOY_RAG_SECRET": "different-production-secret-123456789"},
+            {"DEPLOY_EMBEDDING_API_KEY": "key\nRAG_ENV=development"},
+        ):
+            with self.subTest(keys=list(secret_env)):
+                result, calls, root = self.run_deploy(secret_env=secret_env, existing_token="old-token")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any("stop" in c for c in calls))
+                self.assertEqual((root / ".env").read_text(), "original settings\n")
+                self.assertEqual((root / "cloudflared.env").read_text(), "TUNNEL_TOKEN=old-token\n")
+                self.assertFalse((root / "app-secrets.env").exists())
