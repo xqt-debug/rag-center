@@ -256,6 +256,8 @@ jobs:
       - name: Pull, back up, migrate and deploy
         if: steps.current.outputs.current == 'true'
         shell: bash
+        env:
+          TUNNEL_TOKEN: ${{ secrets.CLOUDFLARED_TUNNEL_TOKEN }}
         run: bash "$DEPLOY_BUNDLE/deploy.sh" "$RAG_IMAGE"
       - name: Remove temporary credentials and deployment attachment
         if: always()

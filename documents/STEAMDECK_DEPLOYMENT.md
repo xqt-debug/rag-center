@@ -2,7 +2,7 @@
 
 ## 流程与边界
 
-部署变更在本机仓库修改、提交并推送，由 GitHub Actions 的 Deck runner 应用同次运行的 Compose 附件；不直接 SSH 修改 Deck 上的部署配置或运行容器。Deck 本地仅配置秘密文件。
+部署变更在本机仓库修改、提交并推送，由 GitHub Actions 的 Deck runner 应用同次运行的 Compose 附件；不直接 SSH 修改 Deck 上的部署配置或运行容器。Tunnel Token 在 GitHub 的 steamdeck Environment secrets 中设置 CLOUDFLARED_TUNNEL_TOKEN，由 runner 自动生成权限 600 的 cloudflared.env；原有应用和数据库秘密文件沿用。
 
 PR 与 main 在 GitHub 托管 runner 执行 Ruff、SQLite/PostgreSQL 测试、前端测试和构建。
 部署配置任务执行 actionlint（含上下文/表达式检查）、bash -n、ShellCheck、Compose config，以及真实 deploy.sh 的 Docker 故障注入测试。
@@ -23,7 +23,7 @@ Deck 不 checkout、不下载业务源码、不构建。它只通过 download-ar
 
 .env.example 与 app.env.example 只供新环境参考，流水线不会把它们下载到 Deck，也不会覆盖真实 env。
 公网配置要求 production，PUBLIC_URL=https://rag.xqtdevelopment.xyz；API 主机端口仅绑定 127.0.0.1。
-cloudflared 与 API 属于同一 Compose 项目；cloudflared.env 保存 TUNNEL_TOKEN，权限 600。
+cloudflared 与 API 属于同一 Compose 项目；cloudflared.env 由部署脚本根据 steamdeck Environment Secret CLOUDFLARED_TUNNEL_TOKEN 自动生成，权限 600，无需 SSH 填写。
 完整配置见 deploy/steamdeck/HTTPS.md。隧道未完成公网验收时，不应视为已上线。
 Embedding Key 留空时实际索引明确失败；不回退 local-test。production 的 HTTPS 和真实 Embedding 校验保持原样。
 

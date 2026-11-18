@@ -44,7 +44,15 @@ elif 'pg_restore' in a: print('archive contents')
 
 @unittest.skipUnless(os.name == "posix", "Requires Linux bash/flock/tar")
 class DeploymentFailures(unittest.TestCase):
-    def run_deploy(self, failure="", image=IMAGE, tunnel_image=TUNNEL_IMAGE, token="a" * 80, legacy=False):
+    def run_deploy(
+        self,
+        failure="",
+        image=IMAGE,
+        tunnel_image=TUNNEL_IMAGE,
+        token="a" * 80,
+        legacy=False,
+        existing_token=None,
+    ):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -53,8 +61,8 @@ class DeploymentFailures(unittest.TestCase):
         for name in (".env", "app.env", "compose.yaml"):
             (root / name).write_text("original settings\n")
         (root / "files" / "note").write_text("original file")
-        if token is not None:
-            (root / "cloudflared.env").write_text("TUNNEL_TOKEN=" + token + "\n")
+        if existing_token is not None:
+            (root / "cloudflared.env").write_text("TUNNEL_TOKEN=" + existing_token + "\n")
         if legacy:
             (root / "caddy.env").write_text("legacy credentials\n")
         docker = root / "bin" / "docker"
@@ -70,6 +78,7 @@ class DeploymentFailures(unittest.TestCase):
             RAG_WORKER_STABILITY_SECONDS="0",
             TEST_TUNNEL_IMAGE=tunnel_image,
             LEGACY_CADDY="1" if legacy else "",
+            TUNNEL_TOKEN=token or "",
         )
         command = ["bash", str(SCRIPT), image]
         result = subprocess.run(command, env=env, capture_output=True, text=True)
@@ -94,6 +103,14 @@ class DeploymentFailures(unittest.TestCase):
         self.assertTrue((backup / "COMPLETE").exists())
         self.assertEqual((backup / "app.env").read_text(), "original settings\n")
         self.assertTrue((backup / "files.tar.gz").is_file())
+
+    def test_environment_secret_creates_private_token_file_without_leaking(self):
+        token = "test-secret-" + "a" * 70
+        result, calls, root = self.run_deploy(token=token)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((root / "cloudflared.env").read_text(), "TUNNEL_TOKEN=" + token + "\n")
+        self.assertEqual((root / "cloudflared.env").stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(token, result.stdout + result.stderr + json.dumps(calls))
 
     def test_pull_failure_does_not_stop_writers(self):
         result, calls, root = self.run_deploy("pull api")
@@ -171,3 +188,11 @@ class DeploymentFailures(unittest.TestCase):
         self.assertEqual(calls[-1][-3:], ["stop", "api", "worker"])
         self.assertNotIn(["stop", "legacy-caddy-id"], calls)
         self.assertFalse((root / "release.env").exists())
+
+    def test_missing_or_malformed_secret_preserves_existing_token_and_writers(self):
+        for token in (None, "invalid", "a" * 80 + "\nINJECTED=yes"):
+            with self.subTest(token=token):
+                result, calls, root = self.run_deploy(token=token, existing_token="old-token")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((root / "cloudflared.env").read_text(), "TUNNEL_TOKEN=old-token\n")
+                self.assertFalse(any("stop" in c for c in calls))

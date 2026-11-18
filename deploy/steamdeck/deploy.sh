@@ -29,14 +29,22 @@ docker compose version >/dev/null
 export RAG_IMAGE="$image"
 compose=(docker compose --project-name rag-center --project-directory "$deploy_dir"
   --env-file "$deploy_dir/.env" -f "$source_dir/compose.yaml")
-# 隧道凭据只保存在部署目录，缺失时在停止写服务之前失败。
-[[ -f "$deploy_dir/cloudflared.env" && ! -L "$deploy_dir/cloudflared.env" ]] || {
-  echo 'Create cloudflared.env on Deck with TUNNEL_TOKEN before deployment.' >&2; exit 1;
+# 令牌由 steamdeck Environment Secret 注入，不从日志或命令行参数读取。
+[[ "${TUNNEL_TOKEN:-}" =~ ^[A-Za-z0-9_+/-]{40,}={0,2}$ ]] || {
+  echo 'Set the CLOUDFLARED_TUNNEL_TOKEN secret in the steamdeck GitHub environment.' >&2; exit 1;
 }
-chmod 600 "$deploy_dir/cloudflared.env"
-grep -Eq '^TUNNEL_TOKEN=[A-Za-z0-9_-]{40,}={0,2}$' "$deploy_dir/cloudflared.env" || {
-  echo 'Set a nonempty, unquoted TUNNEL_TOKEN in cloudflared.env.' >&2; exit 1;
+[[ ! -e "$deploy_dir/cloudflared.env" || -f "$deploy_dir/cloudflared.env" ]] &&
+  [[ ! -L "$deploy_dir/cloudflared.env" ]] || {
+  echo 'cloudflared.env must be a regular file, not a symlink.' >&2; exit 1;
 }
+# 在部署锁内原子更新，仅供连接器容器启动使用；不让其他子进程继承令牌。
+token_tmp=$(mktemp "$deploy_dir/.cloudflared.env.XXXXXX")
+if ! { printf 'TUNNEL_TOKEN=%s\n' "$TUNNEL_TOKEN" > "$token_tmp" &&
+       chmod 600 "$token_tmp" && mv -- "$token_tmp" "$deploy_dir/cloudflared.env"; }; then
+  rm -f -- "$token_tmp"
+  exit 1
+fi
+unset TUNNEL_TOKEN
 "${compose[@]}" config --quiet
 tunnel_image=$("${compose[@]}" config --images | sed -n '\#^cloudflare/cloudflared@sha256:#p')
 [[ "$tunnel_image" =~ ^cloudflare/cloudflared@sha256:[a-f0-9]{64}$ ]] || {

@@ -12,14 +12,16 @@ Compose 默认固定官方 cloudflared 2026.11.1 的镜像摘要；如需更新�
 `CLOUDFLARED_IMAGE=cloudflare/cloudflared@sha256:实际摘要`，禁止使用 latest。
 原 RAG_BIND_IP、RAG_DOMAIN、RAG_HTTPS_PORT、CADDY_IMAGE 不再参与新配置。
 
-在同一目录创建权限 600 的 `cloudflared.env`，填入 Cloudflare Tunnel 安装页面
-`--token` 后面的完整令牌，不加引号，不写整条 Docker 命令：
+在 GitHub 仓库打开 `Settings → Environments → steamdeck → Environment secrets`，
+添加 Secret：名称 `CLOUDFLARED_TUNNEL_TOKEN`，值为 Cloudflare Tunnel 安装页面
+`--token` 后面的完整令牌，不加引号，不填写整条 Docker 命令。
 
-```dotenv
-TUNNEL_TOKEN=填写真实的隧道令牌
-```
+部署作业使用 `environment: steamdeck`，只在部署步骤将 Secret 映射到 TUNNEL_TOKEN。
+部署脚本在锁内自动生成权限 600 的 cloudflared.env，原子替换后清除进程中的 TUNNEL_TOKEN。
+不需要 SSH 手工配置令牌；真实令牌不会进入仓库、部署附件或脚本输出。
+缺少或格式不正确的 Secret 时，预检退出，不覆盖现有令牌文件，也不停止现有服务。
+更新或轮换令牌时，修改同名 Secret 并重新运行最新 main 的工作流。
 
-令牌只在 Deck 本地保存，不提交仓库，不写 GitHub Actions 变量或日志。
 已有 `app.env` 保留签名密钥、数据库和 Embedding 设置，确认：
 
 ```dotenv
@@ -42,7 +44,8 @@ production 要求真实 Embedding、PostgreSQL 和随机签名密钥。账号注
 日常部署通过仓库推送触发 GitHub Actions：在本机修改 Compose 和部署脚本、
 通过检查后推送 main，由流水线发布应用镜像并将同次运行的部署附件交给 Deck runner。
 不要用 SSH 直接覆盖 Deck 的 Compose 或手动更新运行容器。
-Deck 本地只需预先配置 cloudflared.env 等秘密；缺少令牌时部署预检失败，不停止现有写服务。
+Tunnel Token 在 GitHub 的 steamdeck Environment secrets 中管理，runner 自动写入 Deck。
+已有应用和数据库配置沿用，不需要为了隧道迁移重新填写这些密钥。
 
 令牌配置完成后，推送 main，或手动运行最新 main 的 `CI and Steam Deck deployment`。
 确认 `STEAMDECK_DEPLOY_ENABLED=true`，并等待 deploy 作业成功。
@@ -51,7 +54,6 @@ Deck 本地只需预先配置 cloudflared.env 等秘密；缺少令牌时部署�
 ```bash
 cd /home/deck/rag-center-deploy
 source ./docker-env.sh
-chmod 600 .env app.env cloudflared.env
 docker compose --env-file .env --env-file release.env config --quiet
 docker compose --env-file .env --env-file release.env ps cloudflared
 ```
