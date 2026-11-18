@@ -1,123 +1,80 @@
-# Steam Deck 局域网 HTTPS
+# Steam Deck 公网 HTTPS（Cloudflare Tunnel）
 
-目标地址：`https://rag.xqtdevelopment.xyz`。Caddy 使用阿里云 DNS-01 验证，
-自动申请、续期公开可信证书。无需公网 IP、路由器端口转发或云服务器。
-Deck 只拉取 GitHub 构建的应用和 Caddy 镜像，均使用同次 workflow 发布的摘要。
+公网地址为 `https://rag.xqtdevelopment.xyz`。Cloudflare 负责边缘 HTTPS，
+同一 Compose 项目中的 cloudflared 主动建立加密隧道，回源地址为 `http://api:8000`。
+API 主机端口固定绑定 127.0.0.1:8000；数据库与连接器均无主机端口。
+不再需要 Caddy、阿里云 DNS AccessKey、443 低端口权限或路由器端口转发。
 
-## 首次启用
+## 环境变量
 
-1. 在阿里云 DNS 添加 A 记录：主机记录 `rag`，记录值为 Deck 的固定局域网 IP。
-   若 DNS 重绑定保护或代理 Fake-IP 导致解析异常，在路由器本地 DNS 设置相同记录，
-   并让代理对该域名直连。证书的 TXT 验证记录仍然由 Caddy 在公网 DNS 自动管理。
-2. 创建专用 RAM 用户，创建 AccessKey，授予以下自定义策略。密钥只写入 Deck，
-   不要放进聊天、仓库或 Actions 日志。该策略只允许插件需要的 DNS API：
+保留 `/home/deck/rag-center-deploy/.env` 中的 POSTGRES_PASSWORD。
+Compose 默认固定官方 cloudflared 2026.11.1 的镜像摘要；如需更新，可在 .env 设置
+`CLOUDFLARED_IMAGE=cloudflare/cloudflared@sha256:实际摘要`，禁止使用 latest。
+原 RAG_BIND_IP、RAG_DOMAIN、RAG_HTTPS_PORT、CADDY_IMAGE 不再参与新配置。
 
-   ```json
-   {
-     "Version": "1",
-     "Statement": [{
-       "Effect": "Allow",
-       "Action": [
-         "alidns:DescribeDomains",
-         "alidns:DescribeDomainRecords",
-         "alidns:AddDomainRecord",
-         "alidns:UpdateDomainRecord",
-         "alidns:DeleteDomainRecord"
-       ],
-       "Resource": "*"
-     }]
-   }
-   ```
+在同一目录创建权限 600 的 `cloudflared.env`，填入 Cloudflare Tunnel 安装页面
+`--token` 后面的完整令牌，不加引号，不写整条 Docker 命令：
 
-3. Deck 的 Rootless Docker 若不能绑定 443，需要一次管理员配置：
+```dotenv
+TUNNEL_TOKEN=填写真实的隧道令牌
+```
 
-   ```bash
-   sudo sysctl -w net.ipv4.ip_unprivileged_port_start=443
-   echo 'net.ipv4.ip_unprivileged_port_start=443' | sudo tee /etc/sysctl.d/90-rag-https.conf
-   ```
+令牌只在 Deck 本地保存，不提交仓库，不写 GitHub Actions 变量或日志。
+已有 `app.env` 保留签名密钥、数据库和 Embedding 设置，确认：
 
-   这允许普通用户绑定 443 及更高端口。若不想修改系统设置，则在下一步设置
-   `RAG_HTTPS_PORT=8443`，并使用 `https://rag.xqtdevelopment.xyz:8443`。
-   Compose 要求版本 >= 2.24.4（HTTPS 配置使用 `!override` 收回 API 的 LAN 端口）。
+```dotenv
+RAG_ENV=production
+RAG_PUBLIC_URL=https://rag.xqtdevelopment.xyz
+```
 
-4. 保留 `/home/deck/rag-center-deploy` 原有数据库、文件和所有密钥。
-   使用编辑器修改现有文件，避免覆盖原来的配置：
+production 要求真实 Embedding、PostgreSQL 和随机签名密钥。账号注册保持开放。
 
-   `.env` 添加：
+## Cloudflare 后台
 
-   ```dotenv
-   RAG_DOMAIN=rag.xqtdevelopment.xyz
-   RAG_HTTPS_PORT=443
-   ```
+1. 将 xqtdevelopment.xyz 接入 Cloudflare DNS，核对原记录，更新注册商 NS 并等待 Active。
+2. 创建正式的远程管理 Tunnel，选择 cloudflared，保存它的 Tunnel Token。
+3. 添加 Published application route：域名 `rag.xqtdevelopment.xyz`，服务 `http://api:8000`，路径留空。
+4. 如有旧 rag A/AAAA 记录，先记录其值，再移除冲突记录，由 Tunnel 创建代理 DNS 记录。
+5. 不覆盖回源 Host，不在整个站点前设置交互式 Access 登录或 API/MCP 浏览器挑战。
 
-   `app.env` 修改以下两项，保留其他配置及原来的 `RAG_SECRET`：
+## 启动与验收
 
-   ```dotenv
-   RAG_ENV=production
-   RAG_PUBLIC_URL=https://rag.xqtdevelopment.xyz
-   ```
+日常部署通过仓库推送触发 GitHub Actions：在本机修改 Compose 和部署脚本、
+通过检查后推送 main，由流水线发布应用镜像并将同次运行的部署附件交给 Deck runner。
+不要用 SSH 直接覆盖 Deck 的 Compose 或手动更新运行容器。
+Deck 本地只需预先配置 cloudflared.env 等秘密；缺少令牌时部署预检失败，不停止现有写服务。
 
-   新建 `caddy.env`，填入真实值：
-
-   ```dotenv
-   ALIYUN_ACCESS_KEY_ID=填写专用RAM用户的AccessKeyID
-   ALIYUN_ACCESS_KEY_SECRET=填写对应的AccessKeySecret
-   ```
-
-   ```bash
-   chmod 600 /home/deck/rag-center-deploy/{.env,app.env,caddy.env}
-   ```
-
-   `caddy.env` 的存在代表启用 HTTPS。请在配置全部完成后再触发部署。
-   production 同时要求已有的真实 Embedding 配置、PostgreSQL 和有效的签名密钥。
-
-5. 在 GitHub Actions 手动运行最新 main 的 `CI and Steam Deck deployment`，
-   或推送该版本。原有 `STEAMDECK_DEPLOY_ENABLED=true` 及 Deck runner 需保持可用。
-   第一次编译 Caddy 插件可能较慢，之后有构建缓存。
-
-## 部署与验收
-
-- 启用 HTTPS 后：预先拉取和验证 Caddy、检查凭证非空、应用地址和端口，
-  首次启动前检查主机端口权限，再停止写服务、备份、迁移、启动应用。
-- API 的 8000 端口仅绑定主机回环地址；HTTPS 的 443 只绑定 `RAG_BIND_IP`。
-  不发布 80 或 Caddy 管理端口。不启用记录完整请求 URL 的访问日志。
-- 最后启动 Caddy，等待证书并验证证书信任链、域名和代理后的健康接口。
-  最多尝试 60 次；失败不记录成功发布，写服务保持停止，保留备份供排查。
-- `caddy-data/` 保存证书、私钥和 ACME 账户，`caddy-config/` 保存 Caddy 状态。
-  更新镜像不会删除这些目录；不要删掉它们来解决普通配置问题。
-  原有备份会另外保存 Caddy 配置和 caddy.env；证书目录需另做受保护的备份。
-- `release.env` 保存应用和 Caddy 的精确镜像摘要。临时部署附件清理后服务仍正常运行。
-- 浏览器重新访问 HTTPS 域名并登录。旧 MCP 配置需要更新成 HTTPS 域名下的 `/mcp`，
-  使用原有 API 密钥即可。浏览器若有旧页面缓存，强制刷新。
-
-查看 Caddy 日志（不要把含密钥的完整环境文件或 Compose 展开配置发出来）：
+令牌配置完成后，推送 main，或手动运行最新 main 的 `CI and Steam Deck deployment`。
+确认 `STEAMDECK_DEPLOY_ENABLED=true`，并等待 deploy 作业成功。
+以下命令只用于检查配置和运行状态：
 
 ```bash
 cd /home/deck/rag-center-deploy
-set -a
-source release.env
-set +a
-docker compose --env-file .env -f compose.yaml -f compose.https.yaml logs --tail 80 caddy
+source ./docker-env.sh
+chmod 600 .env app.env cloudflared.env
+docker compose --env-file .env --env-file release.env config --quiet
+docker compose --env-file .env --env-file release.env ps cloudflared
 ```
 
-检查 DNS / HTTPS：
+正常部署脚本在停止 API/worker 前检查令牌格式、不可变镜像和 production 公网地址，
+然后沿用备份、迁移和应用检查。连接器启动后从 API 内访问 `http://cloudflared:2000/ready`，
+确认隧道连接成功，最后停止同项目旧 Caddy，并记录 CLOUDFLARED_IMAGE。
+readiness 不代表公网 DNS、域名路由和证书都已验收。
+首次部署后应继续做下述公网检查。
+
+从手机移动网络检查首页、注册登录、上传、检索、下载以及带原 API 密钥的 `/mcp`。
 
 ```bash
-nslookup rag.xqtdevelopment.xyz
-curl --fail --resolve rag.xqtdevelopment.xyz:443:192.168.31.72 https://rag.xqtdevelopment.xyz/api/health
+curl --fail https://rag.xqtdevelopment.xyz/api/health
 ```
 
-如果 Deck IP 不同，替换上面的 IP。不要加 `-k`，否则无法验证证书信任。
-公网 DNS 指向私有 IP 不会让外网设备获得该局域网的访问能力。
+不要添加 -k。旧的 hosts、路由器本地 DNS 或代理 Fake-IP 规则可能仍把域名指向局域网，
+须核对并清除过期覆盖。公网推广前应验证可信代理客户端 IP 和注册/登录限流，
+避免全部用户共用连接器 IP 的限流桶。应用已对 /api/ 与 /mcp 返回 no-store，
+Cloudflare 自定义规则也不能强制缓存这些路径。
 
-## 暂不启用 HTTPS
+迁移期间保留旧 Caddy 配置、证书目录及 caddy.env 的受保护备份；隧道未就绪前不要停旧入口。
+后续确认阿里云密钥无其他用途，再撤销。不要用 down -v 或清理数据库解决连接问题。
 
-没有 `caddy.env` 时继续走原有 HTTP 部署，不会因缺少 DNS 密钥而中断已有服务。
-已经运行过 Caddy 后如需退回 HTTP，先手动停止 Caddy、移走 caddy.env，恢复
-app.env 的原 HTTP 地址及 development 模式，再重新部署；证书目录保留。
-
-参考：
-- https://caddyserver.com/docs/automatic-https
-- https://github.com/caddy-dns/alidns
-- https://github.com/libdns/alidns
-- https://docs.docker.com/engine/security/rootless/troubleshoot/
+参考：https://developers.cloudflare.com/tunnel/get-started/
+参数：https://developers.cloudflare.com/tunnel/reference/run-parameters/

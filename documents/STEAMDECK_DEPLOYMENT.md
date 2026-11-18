@@ -2,6 +2,8 @@
 
 ## 流程与边界
 
+部署变更在本机仓库修改、提交并推送，由 GitHub Actions 的 Deck runner 应用同次运行的 Compose 附件；不直接 SSH 修改 Deck 上的部署配置或运行容器。Deck 本地仅配置秘密文件。
+
 PR 与 main 在 GitHub 托管 runner 执行 Ruff、SQLite/PostgreSQL 测试、前端测试和构建。
 部署配置任务执行 actionlint（含上下文/表达式检查）、bash -n、ShellCheck、Compose config，以及真实 deploy.sh 的 Docker 故障注入测试。
 镜像在 GitHub 构建 linux/amd64，在镜像内验证迁移、OCR 和前端 HTTP；全部通过后才推送同一个已测试镜像到 GHCR，输出注册表 sha256 摘要。
@@ -13,14 +15,16 @@ Deck 不 checkout、不下载业务源码、不构建。它只通过 download-ar
 默认目录 /home/deck/rag-center-deploy，Compose 项目 rag-center；数据库容器 rag-center-db-1，pgvector/pgvector:pg17，用户和库名 rag。
 部署预检要求数据库已健康，且数据挂载源恰为该目录的 postgres；不会创建或重建数据库。
 
-- .env：POSTGRES_PASSWORD、RAG_BIND_IP；保留 Deck 已有随机值，权限 600。
+- .env：POSTGRES_PASSWORD、可选 CLOUDFLARED_IMAGE；保留 Deck 已有随机值，权限 600。
 - app.env：RAG_* 应用参数、签名密钥、随机登录凭据和 Embedding 设置；保留原值，权限 600。
 - postgres/：绑定 /var/lib/postgresql/data；数据库无主机端口。
 - files/：绑定 /data/files；容器 user 0:0 通过 rootless 映射至主机 deck。
-- backups/：每次部署一个私有目录，包含数据库归档、文件、两个 env、原 Compose 和可用的原部署脚本、成功摘要。
+- backups/：每次部署一个私有目录，包含数据库归档、文件、应用、数据库与隧道 env、原 Compose 和可用的原部署脚本、成功摘要。
 
 .env.example 与 app.env.example 只供新环境参考，流水线不会把它们下载到 Deck，也不会覆盖真实 env。
-当前验收为 development，PUBLIC_URL=http://192.168.31.72:8000，RAG_BIND_IP=192.168.31.72。
+公网配置要求 production，PUBLIC_URL=https://rag.xqtdevelopment.xyz；API 主机端口仅绑定 127.0.0.1。
+cloudflared 与 API 属于同一 Compose 项目；cloudflared.env 保存 TUNNEL_TOKEN，权限 600。
+完整配置见 deploy/steamdeck/HTTPS.md。隧道未完成公网验收时，不应视为已上线。
 Embedding Key 留空时实际索引明确失败；不回退 local-test。production 的 HTTPS 和真实 Embedding 校验保持原样。
 
 ## 部署顺序与失败语义
@@ -29,7 +33,7 @@ Embedding Key 留空时实际索引明确失败；不回退 local-test。product
 2. 记录原运行容器 ID，停止 API 和 worker（60 秒宽限）。
 3. pg_dump -Fc，pg_restore --list 验证归档可读；打包并验证 files；复制原配置和签名密钥，写校验和与 COMPLETE 标记。
 4. 启动镜像内迁移，再启动 API/worker。迁移开始后失败，或启动/验收失败，停止两个写入服务，保留数据库和备份；不自动还原数据库或降级 schema。
-5. 检查 HTTP 健康、实际首页 HTML、users 表查询、数据库 revision 等于镜像迁移 heads；确认 worker 30 秒持续运行且无重启。全部成功后保存配置并原子更新 release.env。
+5. 检查 HTTP 健康、实际首页 HTML、users 表查询、数据库 revision 等于镜像迁移 heads；确认 worker 30 秒持续运行且无重启。启动 cloudflared 并检查内部 /ready，隧道连接成功后停止同项目旧 Caddy。全部成功后保存配置并原子更新 release.env（应用与连接器摘要）。公网 DNS/TLS/路由另做验收。
 
 备份之前或备份中失败，可尝试 docker start 原容器 ID。不会用新镜像重建旧容器。
 INT/TERM 和普通错误通过 EXIT 处理；强制断电/SIGKILL 无法由脚本捕获，应人工确认两个写入服务状态。

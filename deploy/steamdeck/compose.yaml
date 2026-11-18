@@ -41,7 +41,8 @@ services:
     <<: *app
     restart: unless-stopped
     ports:
-      - "${RAG_BIND_IP:?Set RAG_BIND_IP}:8000:8000"
+      # 公网请求只通过隧道进入，主机端口仅供本机诊断。
+      - "127.0.0.1:8000:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -54,3 +55,17 @@ services:
     depends_on:
       db:
         condition: service_healthy
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d}
+    restart: unless-stopped
+    env_file: [cloudflared.env]
+    command: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:2000", run]
+    depends_on:
+      api:
+        condition: service_healthy
+    # 就绪探针只在容器网络中可用，不发布任何主机端口。
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
